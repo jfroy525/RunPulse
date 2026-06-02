@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain, Settings2, ArrowUp, ArrowDown, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend, ComposedChart } from 'recharts';
+import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain, Settings2, ArrowUp, ArrowDown, Eye, EyeOff, BarChart3 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -22,6 +22,21 @@ const formatPace = (speedMetersPerSecond) => {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 };
 
+// Converts speed (m/s) directly into total seconds per mile for accurate charting math
+const speedToSecondsPerMile = (speedMetersPerSecond) => {
+  if (!speedMetersPerSecond || speedMetersPerSecond <= 0) return 0;
+  const milesPerHour = speedMetersPerSecond * 2.23694;
+  return Math.round((60 / milesPerHour) * 60);
+};
+
+// Converts total seconds back to a M:SS string for chart labels
+const formatSecondsToPaceString = (totalSeconds) => {
+  if (!totalSeconds) return '0:00';
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
 const metersToMiles = (meters) => (meters * 0.000621371).toFixed(2);
 const metersToFeet = (meters) => Math.round(meters * 3.28084);
 const formatDuration = (seconds) => {
@@ -33,46 +48,6 @@ const formatDuration = (seconds) => {
 };
 
 const parseLocalDateString = (dateStr) => new Date(dateStr + 'T12:00:00');
-
-// --- Mock Data Generator ---
-const generateMockRuns = () => {
-  const runs = [];
-  const now = new Date();
-  let currentHr = 155; 
-  
-  for (let i = 50; i >= 0; i--) {
-    const date = new Date(now);
-    date.setDate(date.getDate() - (i * 2)); 
-    currentHr = currentHr - (Math.random() * 1.5 - 0.5); 
-    const distanceMeters = (3 + Math.random() * 10) * 1609.34;
-    const speedMps = 2.5 + Math.random() * 1.5; 
-    const mockCadence = Math.round(160 + Math.random() * 20);
-    const mockLoad = Math.round(50 + Math.random() * 100);
-    
-    runs.push({
-      id: `mock-${i}`,
-      date: date.toISOString().split('T')[0],
-      name: i % 5 === 0 ? 'Long Run' : (i % 3 === 0 ? 'Tempo Run' : 'Morning Base Run'),
-      distance: parseFloat(metersToMiles(distanceMeters)),
-      pace: formatPace(speedMps),
-      rawSpeed: speedMps,
-      movingTime: formatDuration(distanceMeters / speedMps),
-      avgHr: Math.round(currentHr),
-      maxHr: Math.round(currentHr + 15 + Math.random() * 15),
-      elevation: metersToFeet(Math.random() * 500),
-      cadence: mockCadence,
-      calories: Math.round((distanceMeters / 1609.34) * 110),
-      trainingLoad: mockLoad,
-      intensity: Math.round(60 + Math.random() * 30),
-      rpe: Math.floor(4 + Math.random() * 5),
-      source: 'Coros/Strava Mock',
-      raw: {
-        elapsed_time: (distanceMeters / speedMps) * 1.05
-      }
-    });
-  }
-  return runs.reverse();
-};
 
 const DEFAULT_KPI_CONFIG = {
   totalDistance: true,
@@ -102,9 +77,10 @@ const DEFAULT_COLUMNS = [
 const CHART_METRICS = {
   avgHr: { label: 'Average HR', color: '#f43f5e', unit: 'bpm', icon: Heart },
   maxHr: { label: 'Max HR', color: '#a855f7', unit: 'bpm', icon: Activity },
+  paceSeconds: { label: 'Average Pace', color: '#10b981', unit: '/mi', icon: Timer },
   distance: { label: 'Distance', color: '#3b82f6', unit: 'mi', icon: MapPin },
   elevation: { label: 'Elevation Gain', color: '#f59e0b', unit: 'ft', icon: TrendingUp },
-  cadence: { label: 'Average Cadence', color: '#10b981', unit: 'spm', icon: Footprints },
+  cadence: { label: 'Average Cadence', color: '#6366f1', unit: 'spm', icon: Footprints },
   trainingLoad: { label: 'Training Load', color: '#eab308', unit: '', icon: Zap }
 };
 
@@ -112,6 +88,8 @@ export default function App() {
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   
+  const hasAutoSynced = useRef(false);
+
   // Navigation & Deep Dive State
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedRun, setSelectedRun] = useState(null);
@@ -194,15 +172,36 @@ export default function App() {
       }
     }, (error) => console.error("Error fetching Column prefs:", error));
 
-    // Load Intervals API Credentials
+    // Load Intervals API Credentials and Auto-Sync
     const intervalsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals');
     const unsubscribeIntervals = onSnapshot(intervalsRef, (snap) => {
+      let currentId = athleteId;
+      let currentKey = apiKey;
+
       if (snap.exists()) {
         const data = snap.data();
-        if (data.athleteId) setAthleteId(data.athleteId);
-        if (data.apiKey) setApiKey(data.apiKey);
+        if (data.athleteId) {
+          setAthleteId(data.athleteId);
+          currentId = data.athleteId;
+        }
+        if (data.apiKey) {
+          setApiKey(data.apiKey);
+          currentKey = data.apiKey;
+        }
       }
-    }, (error) => console.error("Error fetching Intervals credentials:", error));
+      
+      // Auto-sync precisely once after we attempt to load saved credentials
+      if (!hasAutoSynced.current) {
+        hasAutoSynced.current = true;
+        fetchIntervalsData(currentId, currentKey);
+      }
+    }, (error) => {
+      console.error("Error fetching Intervals credentials:", error);
+      if (!hasAutoSynced.current) {
+        hasAutoSynced.current = true;
+        fetchIntervalsData(athleteId, apiKey);
+      }
+    });
 
     return () => {
       unsubscribeKpi();
@@ -211,10 +210,12 @@ export default function App() {
     };
   }, [user]);
 
-  // Load Initial Mock Data
+  // Fallback Auto-Sync if Firebase is completely disabled
   useEffect(() => {
-    setRuns(generateMockRuns());
-    setLoading(false);
+    if (!auth && !hasAutoSynced.current) {
+      hasAutoSynced.current = true;
+      fetchIntervalsData(athleteId, apiKey);
+    }
   }, []);
 
   // --- KPI & Column Handlers ---
@@ -298,6 +299,7 @@ export default function App() {
           name: activity.name || 'Unnamed Run',
           distance: parseFloat(metersToMiles(activity.distance || 0)),
           pace: formatPace(activity.average_speed || 0),
+          paceSeconds: speedToSecondsPerMile(activity.average_speed || 0),
           rawSpeed: activity.average_speed || 0,
           movingTime: formatDuration(activity.moving_time || activity.elapsed_time || 0),
           avgHr: activity.average_heartrate ? Math.round(activity.average_heartrate) : null,
@@ -376,13 +378,40 @@ export default function App() {
   const activeMetricConfig = CHART_METRICS[chartMetric];
   const MetricIcon = activeMetricConfig.icon;
   const chartData = useMemo(() => [...timeFilteredRuns].reverse(), [timeFilteredRuns]);
+  
+  // Calculate dynamic average line for the selected metric
   const chartAvg = useMemo(() => {
-    const validData = chartData.filter(r => typeof r[chartMetric] === 'number');
+    const validData = chartData.filter(r => typeof r[chartMetric] === 'number' && r[chartMetric] > 0);
     if (validData.length === 0) return 0;
     const rawAvg = validData.reduce((sum, r) => sum + r[chartMetric], 0) / validData.length;
-    return chartMetric === 'distance' ? parseFloat(rawAvg.toFixed(2)) : Math.round(rawAvg);
+    
+    // Formatting handles specific rounding for distance, pace, vs whole numbers
+    if (chartMetric === 'distance') return parseFloat(rawAvg.toFixed(2));
+    if (chartMetric === 'paceSeconds') return Math.round(rawAvg);
+    return Math.round(rawAvg);
   }, [chartData, chartMetric]);
-  const chartYDomain = ['avgHr', 'maxHr', 'cadence'].includes(chartMetric) ? ['dataMin - 5', 'dataMax + 5'] : [0, 'auto'];
+
+  // Set chart scaling domains
+  // Note: Pace is inverted (reversed) so that "faster" (lower seconds) visually appears higher on the graph.
+  const getChartYDomain = () => {
+    if (chartMetric === 'paceSeconds') return ['auto', 'auto']; // Handled explicitly by reversed prop on YAxis
+    if (['avgHr', 'maxHr', 'cadence'].includes(chartMetric)) return ['dataMin - 5', 'dataMax + 5'];
+    return [0, 'auto'];
+  };
+
+  // Tooltip Formatter to gracefully handle Pace strings vs Numeric values
+  const tooltipFormatter = (value, name, props) => {
+    if (chartMetric === 'paceSeconds') {
+      return [`${formatSecondsToPaceString(value)} /mi`, activeMetricConfig.label];
+    }
+    return [`${value} ${activeMetricConfig.unit}`, activeMetricConfig.label];
+  };
+
+  // Tick Formatter for Y Axis
+  const yAxisTickFormatter = (val) => {
+    if (chartMetric === 'paceSeconds') return formatSecondsToPaceString(val);
+    return Math.round(val);
+  };
 
   // --- Best Efforts Calculation ---
   const bestEfforts = useMemo(() => {
@@ -426,10 +455,16 @@ export default function App() {
       sortableRuns.sort((a, b) => {
         let aValue = a[sortConfig.key];
         let bValue = b[sortConfig.key];
-        if (['distance', 'avgHr', 'maxHr', 'elevation', 'cadence', 'calories', 'trainingLoad', 'intensity', 'rpe'].includes(sortConfig.key)) {
+        
+        // Ensure Pace is sorted numerically by seconds, not alphabetically by string
+        if (sortConfig.key === 'pace') {
+          aValue = a.paceSeconds || 0;
+          bValue = b.paceSeconds || 0;
+        } else if (['distance', 'avgHr', 'maxHr', 'elevation', 'cadence', 'calories', 'trainingLoad', 'intensity', 'rpe'].includes(sortConfig.key)) {
           aValue = parseFloat(aValue) || 0;
           bValue = parseFloat(bValue) || 0;
         }
+
         if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
         if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
         return 0;
@@ -494,6 +529,12 @@ export default function App() {
             className={`pb-3 text-sm font-semibold transition-colors ${activeTab === 'dashboard' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}
           >
             Dashboard & History
+          </button>
+          <button 
+            onClick={() => setActiveTab('analytics')}
+            className={`pb-3 text-sm font-semibold transition-colors ${activeTab === 'analytics' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}
+          >
+            Advanced Analytics
           </button>
           <button 
             onClick={() => setActiveTab('best-efforts')}
@@ -637,10 +678,36 @@ export default function App() {
                     <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: -20 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
                       <XAxis dataKey="date" tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} stroke="#9ca3af" fontSize={12} tickMargin={10} />
-                      <YAxis domain={chartYDomain} stroke="#9ca3af" fontSize={12} tickFormatter={(val) => Math.round(val)} />
-                      <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})} formatter={(value) => [`${value} ${activeMetricConfig.unit}`, activeMetricConfig.label]} />
-                      {chartAvg > 0 && <ReferenceLine y={chartAvg} stroke="#e5e7eb" strokeDasharray="3 3" label={{ position: 'insideTopLeft', value: `Avg: ${chartAvg}`, fill: '#9ca3af', fontSize: 12 }} />}
-                      <Line type="monotone" dataKey={chartMetric} stroke={activeMetricConfig.color} strokeWidth={3} dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }} activeDot={{ r: 6, strokeWidth: 0 }} name={activeMetricConfig.label} connectNulls={true} />
+                      <YAxis 
+                        domain={getChartYDomain()} 
+                        stroke="#9ca3af" 
+                        fontSize={12} 
+                        tickFormatter={yAxisTickFormatter} 
+                        reversed={chartMetric === 'paceSeconds'} // Reverse pace so faster (lower time) is visually higher
+                      />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
+                        labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})} 
+                        formatter={tooltipFormatter} 
+                      />
+                      {chartAvg > 0 && (
+                        <ReferenceLine 
+                          y={chartAvg} 
+                          stroke="#e5e7eb" 
+                          strokeDasharray="3 3" 
+                          label={{ position: 'insideTopLeft', value: `Avg: ${chartMetric === 'paceSeconds' ? formatSecondsToPaceString(chartAvg) : chartAvg}`, fill: '#9ca3af', fontSize: 12 }} 
+                        />
+                      )}
+                      <Line 
+                        type="monotone" 
+                        dataKey={chartMetric} 
+                        stroke={activeMetricConfig.color} 
+                        strokeWidth={3} 
+                        dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }} 
+                        activeDot={{ r: 6, strokeWidth: 0 }} 
+                        name={activeMetricConfig.label} 
+                        connectNulls={true} 
+                      />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
@@ -724,6 +791,87 @@ export default function App() {
                     )}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- VIEW: ADVANCED ANALYTICS (Multi-Metric Chart) --- */}
+        {activeTab === 'analytics' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+              <div className="mb-6 border-b border-gray-100 pb-4">
+                <h2 className="text-2xl font-bold text-gray-800 flex items-center">
+                  <BarChart3 className="w-6 h-6 mr-3 text-indigo-500" /> 
+                  Distance vs. Pace vs. Heart Rate
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Visualize how your pace and heart rate respond to different running volumes. This chart maps your entire loaded history.
+                </p>
+              </div>
+
+              <div className="h-[500px] w-full mt-4">
+                {chartData.length < 2 ? (
+                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">Not enough data to map advanced correlations.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={chartData} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                      <XAxis 
+                        dataKey="date" 
+                        tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} 
+                        stroke="#9ca3af" 
+                        fontSize={12} 
+                        tickMargin={10} 
+                      />
+                      
+                      {/* Left Y-Axis: Distance (Bars) */}
+                      <YAxis 
+                        yAxisId="distance" 
+                        orientation="left" 
+                        stroke="#3b82f6" 
+                        fontSize={12} 
+                        label={{ value: 'Distance (mi)', angle: -90, position: 'insideLeft', style: { textAnchor: 'middle', fill: '#3b82f6', fontSize: 12 } }}
+                      />
+                      
+                      {/* Right Y-Axis 1: Heart Rate (Red Line) */}
+                      <YAxis 
+                        yAxisId="hr" 
+                        orientation="right" 
+                        stroke="#f43f5e" 
+                        fontSize={12} 
+                        domain={['dataMin - 10', 'dataMax + 10']}
+                        label={{ value: 'Avg HR (bpm)', angle: 90, position: 'insideRight', style: { textAnchor: 'middle', fill: '#f43f5e', fontSize: 12 } }}
+                      />
+
+                      {/* Right Y-Axis 2: Pace (Green Line - Hidden axis scale to avoid clutter, but maps the data) */}
+                      <YAxis 
+                        yAxisId="pace" 
+                        orientation="right" 
+                        hide={true} 
+                        reversed={true} // Reverse so faster pace is higher
+                        domain={['dataMin - 15', 'dataMax + 15']}
+                      />
+
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
+                        labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})}
+                        formatter={(value, name) => {
+                          if (name === 'Average Pace') return [`${formatSecondsToPaceString(value)} /mi`, name];
+                          if (name === 'Distance') return [`${value} mi`, name];
+                          if (name === 'Average HR') return [`${value} bpm`, name];
+                          return [value, name];
+                        }}
+                      />
+                      <Legend verticalAlign="top" height={36} iconType="circle" wrapperStyle={{ fontSize: '13px' }}/>
+                      
+                      {/* Data Elements */}
+                      <Bar yAxisId="distance" dataKey="distance" name="Distance" fill="#eff6ff" stroke="#3b82f6" strokeWidth={1} radius={[4, 4, 0, 0]} barSize={20} />
+                      <Line yAxisId="pace" type="monotone" dataKey="paceSeconds" name="Average Pace" stroke="#10b981" strokeWidth={3} dot={false} activeDot={{ r: 6, strokeWidth: 0 }} connectNulls={true} />
+                      <Line yAxisId="hr" type="monotone" dataKey="avgHr" name="Average HR" stroke="#f43f5e" strokeWidth={3} dot={false} activeDot={{ r: 6, strokeWidth: 0 }} connectNulls={true} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </div>
           </div>
