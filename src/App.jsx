@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain } from 'lucide-react';
+import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain, Settings2, ArrowUp, ArrowDown, Eye, EyeOff } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -32,7 +32,6 @@ const formatDuration = (seconds) => {
   return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
 };
 
-// --- Fix for JS Timezone Offset bug on YYYY-MM-DD strings ---
 const parseLocalDateString = (dateStr) => new Date(dateStr + 'T12:00:00');
 
 // --- Mock Data Generator ---
@@ -40,7 +39,6 @@ const generateMockRuns = () => {
   const runs = [];
   const now = new Date();
   let currentHr = 155; 
-  
   
   for (let i = 50; i >= 0; i--) {
     const date = new Date(now);
@@ -57,20 +55,18 @@ const generateMockRuns = () => {
       name: i % 5 === 0 ? 'Long Run' : (i % 3 === 0 ? 'Tempo Run' : 'Morning Base Run'),
       distance: parseFloat(metersToMiles(distanceMeters)),
       pace: formatPace(speedMps),
-      rawSpeed: speedMps, // Used for Best Efforts calculation
+      rawSpeed: speedMps,
       movingTime: formatDuration(distanceMeters / speedMps),
       avgHr: Math.round(currentHr),
       maxHr: Math.round(currentHr + 15 + Math.random() * 15),
       elevation: metersToFeet(Math.random() * 500),
-      cadence: mockCadence, // Added for dynamic charting
-      trainingLoad: mockLoad, // Added for dynamic charting
+      cadence: mockCadence,
+      calories: Math.round((distanceMeters / 1609.34) * 110),
+      trainingLoad: mockLoad,
+      intensity: Math.round(60 + Math.random() * 30),
+      rpe: Math.floor(4 + Math.random() * 5),
       source: 'Coros/Strava Mock',
       raw: {
-        calories: Math.round((distanceMeters / 1609.34) * 110),
-        average_cadence: mockCadence / 2, // Intervals uses single leg
-        icu_training_load: mockLoad,
-        icu_intensity: (60 + Math.random() * 30).toFixed(1),
-        perceived_exertion: Math.floor(4 + Math.random() * 5),
         elapsed_time: (distanceMeters / speedMps) * 1.05
       }
     });
@@ -87,7 +83,22 @@ const DEFAULT_KPI_CONFIG = {
   totalElevation: false
 };
 
-// --- Chart Metric Configuration ---
+const DEFAULT_COLUMNS = [
+  { key: 'date', label: 'Date', visible: true },
+  { key: 'name', label: 'Name', visible: true },
+  { key: 'distance', label: 'Distance', visible: true },
+  { key: 'pace', label: 'Pace', visible: true },
+  { key: 'movingTime', label: 'Time', visible: false },
+  { key: 'elevation', label: 'Elevation', visible: false },
+  { key: 'avgHr', label: 'Avg HR', visible: true },
+  { key: 'maxHr', label: 'Max HR', visible: true },
+  { key: 'cadence', label: 'Cadence', visible: false },
+  { key: 'calories', label: 'Calories', visible: false },
+  { key: 'trainingLoad', label: 'Load', visible: false },
+  { key: 'intensity', label: 'Intensity', visible: false },
+  { key: 'rpe', label: 'RPE', visible: false }
+];
+
 const CHART_METRICS = {
   avgHr: { label: 'Average HR', color: '#f43f5e', unit: 'bpm', icon: Heart },
   maxHr: { label: 'Max HR', color: '#a855f7', unit: 'bpm', icon: Activity },
@@ -108,12 +119,16 @@ export default function App() {
   // Auth & DB State
   const [user, setUser] = useState(null);
   const [loginError, setLoginError] = useState('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
   
-  // KPI Config State
+  // Configs
   const [kpiConfig, setKpiConfig] = useState(DEFAULT_KPI_CONFIG);
-  const [showKpiModal, setShowKpiModal] = useState(false);
   const [tempKpiConfig, setTempKpiConfig] = useState(DEFAULT_KPI_CONFIG);
+  const [showKpiModal, setShowKpiModal] = useState(false);
+
+  // Column Configuration State
+  const [columnConfig, setColumnConfig] = useState(DEFAULT_COLUMNS);
+  const [tempColumnConfig, setTempColumnConfig] = useState(DEFAULT_COLUMNS);
+  const [showColumnModal, setShowColumnModal] = useState(false);
 
   // Dashboard Time Filter & Chart State
   const [timeFrame, setTimeFrame] = useState('All Time');
@@ -121,7 +136,7 @@ export default function App() {
 
   // Table State
   const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
-  const [filters, setFilters] = useState({ date: '', name: '', distance: '', pace: '', avgHr: '', maxHr: '' });
+  const [filters, setFilters] = useState({});
 
   // Intervals.icu Auth State
   const [showSettings, setShowSettings] = useState(false);
@@ -155,16 +170,31 @@ export default function App() {
   useEffect(() => {
     if (!user || !db) return;
 
+    // Load KPI Preferences
     const prefsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'kpi');
-    
     const unsubscribeKpi = onSnapshot(prefsRef, (snap) => {
-      if (snap.exists()) {
-        setKpiConfig(snap.data());
-      }
-    }, (error) => {
-      console.error("Error fetching KPI preferences:", error);
-    });
+      if (snap.exists()) setKpiConfig(snap.data());
+    }, (error) => console.error("Error fetching KPI prefs:", error));
 
+    // Load Column Preferences
+    const columnsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'columns');
+    const unsubscribeColumns = onSnapshot(columnsRef, (snap) => {
+      if (snap.exists()) {
+        const savedCols = snap.data().columns;
+        // Merge saved settings with default definitions in case new columns are added later
+        const mergedCols = savedCols.map(savedCol => {
+          const defaultCol = DEFAULT_COLUMNS.find(c => c.key === savedCol.key);
+          return { ...defaultCol, ...savedCol };
+        }).filter(c => c.key); 
+        
+        // Add any new default columns that weren't in saved settings
+        const missingCols = DEFAULT_COLUMNS.filter(dc => !savedCols.find(sc => sc.key === dc.key));
+        
+        setColumnConfig([...mergedCols, ...missingCols]);
+      }
+    }, (error) => console.error("Error fetching Column prefs:", error));
+
+    // Load Intervals API Credentials
     const intervalsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals');
     const unsubscribeIntervals = onSnapshot(intervalsRef, (snap) => {
       if (snap.exists()) {
@@ -172,12 +202,11 @@ export default function App() {
         if (data.athleteId) setAthleteId(data.athleteId);
         if (data.apiKey) setApiKey(data.apiKey);
       }
-    }, (error) => {
-      console.error("Error fetching Intervals credentials:", error);
-    });
+    }, (error) => console.error("Error fetching Intervals credentials:", error));
 
     return () => {
       unsubscribeKpi();
+      unsubscribeColumns();
       unsubscribeIntervals();
     };
   }, [user]);
@@ -188,19 +217,41 @@ export default function App() {
     setLoading(false);
   }, []);
 
-  // --- KPI Preferences Handler ---
+  // --- KPI & Column Handlers ---
   const saveKpiPreferences = async () => {
     setKpiConfig(tempKpiConfig);
     setShowKpiModal(false);
-    
     if (user && db) {
       try {
-        const prefsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'kpi');
-        await setDoc(prefsRef, tempKpiConfig);
-      } catch (error) {
-        console.error("Error saving KPI preferences:", error);
-      }
+        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'kpi'), tempKpiConfig);
+      } catch (error) { console.error("Error saving KPI preferences:", error); }
     }
+  };
+
+  const saveColumnPreferences = async () => {
+    setColumnConfig(tempColumnConfig);
+    setShowColumnModal(false);
+    if (user && db) {
+      try {
+        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'columns'), { columns: tempColumnConfig });
+      } catch (error) { console.error("Error saving Column preferences:", error); }
+    }
+  };
+
+  const moveColumn = (index, direction) => {
+    const newConfig = [...tempColumnConfig];
+    if (direction === 'up' && index > 0) {
+      [newConfig[index - 1], newConfig[index]] = [newConfig[index], newConfig[index - 1]];
+    } else if (direction === 'down' && index < newConfig.length - 1) {
+      [newConfig[index + 1], newConfig[index]] = [newConfig[index], newConfig[index + 1]];
+    }
+    setTempColumnConfig(newConfig);
+  };
+
+  const toggleColumnVisibility = (index) => {
+    const newConfig = [...tempColumnConfig];
+    newConfig[index].visible = !newConfig[index].visible;
+    setTempColumnConfig(newConfig);
   };
 
   // --- Intervals.icu API Logic ---
@@ -225,16 +276,13 @@ export default function App() {
       
       if (!response.ok) {
         let errorMsg = `API Error ${response.status}`;
-        if (response.status === 401) errorMsg = "401 Unauthorized: Please check your API Key.";
-        if (response.status === 404) errorMsg = "404 Not Found: Please check your Athlete ID.";
+        if (response.status === 401) errorMsg = "401 Unauthorized: Check your API Key.";
+        if (response.status === 404) errorMsg = "404 Not Found: Check your Athlete ID.";
         throw new Error(errorMsg);
       }
       
       const data = await response.json();
-      
-      if (!Array.isArray(data)) {
-        throw new Error("Received unexpected data format from Intervals.icu");
-      }
+      if (!Array.isArray(data)) throw new Error("Received unexpected data format.");
       
       const foundTypes = new Set();
       
@@ -242,8 +290,7 @@ export default function App() {
         .filter(activity => {
           if (!activity.type) return false;
           foundTypes.add(activity.type);
-          const type = String(activity.type).toLowerCase();
-          return type.includes('run'); 
+          return String(activity.type).toLowerCase().includes('run'); 
         })
         .map(activity => ({
           id: activity.id || Math.random().toString(),
@@ -251,34 +298,31 @@ export default function App() {
           name: activity.name || 'Unnamed Run',
           distance: parseFloat(metersToMiles(activity.distance || 0)),
           pace: formatPace(activity.average_speed || 0),
-          rawSpeed: activity.average_speed || 0, // Saved for Best Efforts calculations
+          rawSpeed: activity.average_speed || 0,
           movingTime: formatDuration(activity.moving_time || activity.elapsed_time || 0),
           avgHr: activity.average_heartrate ? Math.round(activity.average_heartrate) : null,
           maxHr: activity.max_heartrate ? Math.round(activity.max_heartrate) : null,
           elevation: metersToFeet(activity.total_elevation_gain || 0),
           cadence: activity.average_cadence ? Math.round(activity.average_cadence * 2) : null,
+          calories: activity.calories ? Math.round(activity.calories) : null,
           trainingLoad: activity.icu_training_load || null,
+          intensity: activity.icu_intensity ? Math.round(activity.icu_intensity) : null,
+          rpe: activity.perceived_exertion || null,
           source: 'Intervals.icu',
-          raw: activity // Keep the full raw object for the Deep Dive modal
+          raw: activity 
         }));
 
       if (formattedRuns.length === 0) {
-        const typesList = Array.from(foundTypes).join(', ');
-        setApiError(`Connected successfully, but 0 running activities were found. Activity types found in your feed: ${typesList || 'None (Empty Feed)'}`);
+        setApiError(`Connected successfully, but 0 running activities were found. Activities found: ${Array.from(foundTypes).join(', ') || 'None'}`);
       } else {
         setRuns(formattedRuns);
         setShowSettings(false);
-        
         if (user && db) {
           try {
-            const intervalsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals');
-            await setDoc(intervalsRef, { athleteId: cleanId, apiKey: cleanKey }, { merge: true });
-          } catch (err) {
-            console.error("Failed to save Intervals credentials:", err);
-          }
+            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals'), { athleteId: cleanId, apiKey: cleanKey }, { merge: true });
+          } catch (err) { console.error("Failed to save credentials:", err); }
         }
       }
-      
     } catch (err) {
       setApiError(err.message);
     } finally {
@@ -304,21 +348,17 @@ export default function App() {
     
     if (runsWithHr.length === 0) {
       return { 
-        avg: 0, trend: 0, 
-        totalRuns: activeRuns.length, 
+        avg: 0, trend: 0, totalRuns: activeRuns.length, 
         totalDistance: Math.round(activeRuns.reduce((s, r) => s + r.distance, 0)),
-        maxHr: 0,
-        totalElevation: Math.round(activeRuns.reduce((s, r) => s + r.elevation, 0))
+        maxHr: 0, totalElevation: Math.round(activeRuns.reduce((s, r) => s + r.elevation, 0))
       };
     }
     
     const totalHr = runsWithHr.reduce((sum, run) => sum + run.avgHr, 0);
     const overallAvg = Math.round(totalHr / runsWithHr.length);
-    
     const midPoint = Math.floor(runsWithHr.length / 2);
     const recent = runsWithHr.slice(0, midPoint || 1); 
     const previous = runsWithHr.slice(midPoint, runsWithHr.length);
-    
     const recentAvg = recent.length ? recent.reduce((s, r) => s + r.avgHr, 0) / recent.length : overallAvg;
     const previousAvg = previous.length ? previous.reduce((s, r) => s + r.avgHr, 0) / previous.length : overallAvg;
     
@@ -336,62 +376,46 @@ export default function App() {
   const activeMetricConfig = CHART_METRICS[chartMetric];
   const MetricIcon = activeMetricConfig.icon;
   const chartData = useMemo(() => [...timeFilteredRuns].reverse(), [timeFilteredRuns]);
-  
-  // Calculate dynamic average line for the selected metric
   const chartAvg = useMemo(() => {
     const validData = chartData.filter(r => typeof r[chartMetric] === 'number');
     if (validData.length === 0) return 0;
     const rawAvg = validData.reduce((sum, r) => sum + r[chartMetric], 0) / validData.length;
     return chartMetric === 'distance' ? parseFloat(rawAvg.toFixed(2)) : Math.round(rawAvg);
   }, [chartData, chartMetric]);
-
-  // Set chart scaling domains (HR/Cadence shouldn't start at 0, Distance/Load should)
-  const chartYDomain = ['avgHr', 'maxHr', 'cadence'].includes(chartMetric) 
-    ? ['dataMin - 5', 'dataMax + 5'] 
-    : [0, 'auto'];
+  const chartYDomain = ['avgHr', 'maxHr', 'cadence'].includes(chartMetric) ? ['dataMin - 5', 'dataMax + 5'] : [0, 'auto'];
 
   // --- Best Efforts Calculation ---
   const bestEfforts = useMemo(() => {
     const targets = [
-      { name: '1 Mile', distanceMi: 1 },
-      { name: '5K', distanceMi: 3.10686 },
-      { name: '10K', distanceMi: 6.21371 },
-      { name: 'Half Marathon', distanceMi: 13.1094 },
+      { name: '1 Mile', distanceMi: 1 }, { name: '5K', distanceMi: 3.10686 },
+      { name: '10K', distanceMi: 6.21371 }, { name: 'Half Marathon', distanceMi: 13.1094 },
       { name: 'Marathon', distanceMi: 26.2188 }
     ];
 
     return targets.map(target => {
       const eligibleRuns = runs.filter(r => r.distance >= target.distanceMi && r.rawSpeed > 0);
+      if (eligibleRuns.length === 0) return { ...target, time: '--', pace: '--', date: null, runName: null };
       
-      if (eligibleRuns.length === 0) {
-        return { ...target, time: '--', pace: '--', date: null, runName: null };
-      }
-
-      const bestRun = eligibleRuns.reduce((fastest, current) => 
-        (current.rawSpeed > fastest.rawSpeed) ? current : fastest
-      );
-
-      const targetMeters = target.distanceMi * 1609.34;
-      const estimatedSeconds = targetMeters / bestRun.rawSpeed;
+      const bestRun = eligibleRuns.reduce((fastest, current) => (current.rawSpeed > fastest.rawSpeed) ? current : fastest);
+      const estimatedSeconds = (target.distanceMi * 1609.34) / bestRun.rawSpeed;
 
       return {
         ...target,
-        time: formatDuration(estimatedSeconds),
-        pace: bestRun.pace,
-        date: bestRun.date,
-        runName: bestRun.name
+        time: formatDuration(estimatedSeconds), pace: bestRun.pace,
+        date: bestRun.date, runName: bestRun.name
       };
     });
   }, [runs]);
 
   // --- Table Filtering & Sorting ---
+  const visibleColumns = useMemo(() => columnConfig.filter(c => c.visible), [columnConfig]);
+
   const filteredRuns = useMemo(() => {
     return runs.filter(run => {
       return Object.keys(filters).every(key => {
         if (!filters[key]) return true;
         const runValue = String(run[key] || '').toLowerCase();
-        const filterValue = filters[key].toLowerCase();
-        return runValue.includes(filterValue);
+        return runValue.includes(filters[key].toLowerCase());
       });
     });
   }, [runs, filters]);
@@ -402,7 +426,7 @@ export default function App() {
       sortableRuns.sort((a, b) => {
         let aValue = a[sortConfig.key];
         let bValue = b[sortConfig.key];
-        if (['distance', 'avgHr', 'maxHr', 'elevation'].includes(sortConfig.key)) {
+        if (['distance', 'avgHr', 'maxHr', 'elevation', 'cadence', 'calories', 'trainingLoad', 'intensity', 'rpe'].includes(sortConfig.key)) {
           aValue = parseFloat(aValue) || 0;
           bValue = parseFloat(bValue) || 0;
         }
@@ -420,16 +444,31 @@ export default function App() {
     setSortConfig({ key, direction });
   };
 
-  const SortIcon = ({ columnKey }) => {
-    if (sortConfig.key !== columnKey) return <span className="text-gray-300 w-4 h-4 ml-1 inline-block" />;
-    return sortConfig.direction === 'asc' ? 
-      <ChevronUp className="w-4 h-4 ml-1 inline-block text-blue-500" /> : 
-      <ChevronDown className="w-4 h-4 ml-1 inline-block text-blue-500" />;
+  const renderCellContent = (run, key) => {
+    switch (key) {
+      case 'date': return parseLocalDateString(run.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric'});
+      case 'name': return <span className="truncate max-w-[200px] inline-block align-bottom" title={run.name}>{run.name}</span>;
+      case 'distance': return <>{run.distance} <span className="text-xs text-gray-400">mi</span></>;
+      case 'pace': return <>{run.pace} <span className="text-xs text-gray-400">/mi</span></>;
+      case 'movingTime': return run.movingTime;
+      case 'elevation': return <>{run.elevation} <span className="text-xs text-gray-400">ft</span></>;
+      case 'avgHr': return (
+        <span className={`px-2 py-1 rounded font-medium ${!run.avgHr ? 'text-gray-400' : run.avgHr > 165 ? 'bg-rose-100 text-rose-700' : run.avgHr > 145 ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
+          {run.avgHr || '--'} {run.avgHr && <span className="text-xs opacity-70">bpm</span>}
+        </span>
+      );
+      case 'maxHr': return run.maxHr || '--';
+      case 'cadence': return run.cadence ? <>{run.cadence} <span className="text-xs text-gray-400">spm</span></> : '--';
+      case 'calories': return run.calories ? <>{run.calories.toLocaleString()} <span className="text-xs text-gray-400">kcal</span></> : '--';
+      case 'trainingLoad': return run.trainingLoad || '--';
+      case 'intensity': return run.intensity ? <>{run.intensity}<span className="text-xs text-gray-400">%</span></> : '--';
+      case 'rpe': return run.rpe ? <>{run.rpe} <span className="text-xs text-gray-400">/10</span></> : '--';
+      default: return run[key] || '--';
+    }
   };
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans pb-12">
-      {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 pt-4 shadow-sm z-20 sticky top-0">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
           <div className="flex items-center space-x-3 w-full sm:w-auto">
@@ -449,7 +488,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Tab Navigation */}
         <div className="flex space-x-6 border-b border-gray-200 mt-2">
           <button 
             onClick={() => setActiveTab('dashboard')}
@@ -466,7 +504,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Global Errors */}
       {loginError && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
           <div className="bg-red-50 border border-red-200 p-4 rounded-lg shadow-sm flex items-start justify-between">
@@ -474,9 +511,7 @@ export default function App() {
               <AlertCircle className="w-5 h-5 text-red-500 mr-3 flex-shrink-0 mt-0.5" />
               <p className="text-sm text-red-800">{loginError}</p>
             </div>
-            <button onClick={() => setLoginError('')} className="text-red-400 hover:text-red-600 p-1">
-              <X className="w-4 h-4" />
-            </button>
+            <button onClick={() => setLoginError('')} className="text-red-400 hover:text-red-600 p-1"><X className="w-4 h-4" /></button>
           </div>
         </div>
       )}
@@ -486,24 +521,19 @@ export default function App() {
         {/* --- VIEW: DASHBOARD & HISTORY --- */}
         {activeTab === 'dashboard' && (
           <div className="space-y-8 animate-in fade-in duration-300">
-            {/* Dashboard Header & Filters */}
+            {/* KPI Controls & Time Filter */}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center space-y-4 sm:space-y-0">
               <h2 className="text-2xl font-bold text-gray-800">Performance Overview</h2>
               <div className="flex flex-wrap items-center gap-3">
                 <button
-                  onClick={() => {
-                    setTempKpiConfig(kpiConfig);
-                    setShowKpiModal(true);
-                  }}
+                  onClick={() => { setTempKpiConfig(kpiConfig); setShowKpiModal(true); }}
                   className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm transition-colors"
                 >
                   <Layout className="w-4 h-4 mr-2" />
                   Customize KPIs
                 </button>
                 <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
-                  <div className="pl-3 pr-2 py-1.5 text-gray-400">
-                    <Calendar className="w-4 h-4" />
-                  </div>
+                  <div className="pl-3 pr-2 py-1.5 text-gray-400"><Calendar className="w-4 h-4" /></div>
                   <select
                     value={timeFrame}
                     onChange={(e) => setTimeFrame(e.target.value)}
@@ -521,7 +551,7 @@ export default function App() {
             {/* Dynamic KPI Dashboard */}
             <div className="flex flex-wrap gap-4">
               {kpiConfig.totalDistance && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4 transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-blue-50 p-3 rounded-full text-blue-600"><MapPin className="w-6 h-6" /></div>
                   <div>
                     <p className="text-sm font-medium text-gray-500">Total Distance</p>
@@ -529,9 +559,8 @@ export default function App() {
                   </div>
                 </div>
               )}
-              
               {kpiConfig.totalRuns && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4 transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-green-50 p-3 rounded-full text-green-600"><Clock className="w-6 h-6" /></div>
                   <div>
                     <p className="text-sm font-medium text-gray-500">Total Runs</p>
@@ -539,9 +568,8 @@ export default function App() {
                   </div>
                 </div>
               )}
-
               {kpiConfig.avgHr && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4 transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-rose-50 p-3 rounded-full text-rose-600"><Heart className="w-6 h-6" /></div>
                   <div>
                     <p className="text-sm font-medium text-gray-500">Average HR</p>
@@ -549,29 +577,23 @@ export default function App() {
                   </div>
                 </div>
               )}
-
               {kpiConfig.hrTrend && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex flex-col justify-center transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex flex-col justify-center">
                   <div className="flex items-center justify-between mb-1">
                     <p className="text-sm font-medium text-gray-500">HR Trend</p>
                     {stats.trend === 0 ? (
                       <span className="text-xs font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded-full">Stable</span>
                     ) : stats.trend < 0 ? (
-                      <span className="flex items-center text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">
-                        <TrendingDown className="w-3 h-3 mr-1" /> {Math.abs(stats.trend)} bpm
-                      </span>
+                      <span className="flex items-center text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full"><TrendingDown className="w-3 h-3 mr-1" /> {Math.abs(stats.trend)} bpm</span>
                     ) : (
-                      <span className="flex items-center text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-full">
-                        <TrendingUp className="w-3 h-3 mr-1" /> +{stats.trend} bpm
-                      </span>
+                      <span className="flex items-center text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-full"><TrendingUp className="w-3 h-3 mr-1" /> +{stats.trend} bpm</span>
                     )}
                   </div>
                   <p className="text-xs text-gray-400">Within timeframe</p>
                 </div>
               )}
-
               {kpiConfig.maxHr && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4 transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-purple-50 p-3 rounded-full text-purple-600"><Activity className="w-6 h-6" /></div>
                   <div>
                     <p className="text-sm font-medium text-gray-500">Highest Max HR</p>
@@ -579,9 +601,8 @@ export default function App() {
                   </div>
                 </div>
               )}
-
               {kpiConfig.totalElevation && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4 transition-all hover:shadow-md">
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-amber-50 p-3 rounded-full text-amber-600"><TrendingUp className="w-6 h-6" /></div>
                   <div>
                     <p className="text-sm font-medium text-gray-500">Elevation Gain</p>
@@ -606,98 +627,74 @@ export default function App() {
                     ))}
                   </select>
                 </div>
-                <span className="text-xs font-medium text-gray-500 bg-gray-50 px-2 py-1 rounded border border-gray-100">
-                  {timeFrame}
-                </span>
+                <span className="text-xs font-medium text-gray-500 bg-gray-50 px-2 py-1 rounded border border-gray-100">{timeFrame}</span>
               </div>
               <div className="h-72 w-full">
                 {chartData.length < 2 ? (
-                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">
-                    Not enough data points in this timeframe to chart.
-                  </div>
+                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">Not enough data points in this timeframe to chart.</div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: -20 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                      <XAxis 
-                        dataKey="date" 
-                        tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})}
-                        stroke="#9ca3af" 
-                        fontSize={12}
-                        tickMargin={10}
-                      />
-                      <YAxis 
-                        domain={chartYDomain} 
-                        stroke="#9ca3af" 
-                        fontSize={12}
-                        tickFormatter={(val) => Math.round(val)}
-                      />
-                      <Tooltip 
-                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                        labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})}
-                        formatter={(value) => [`${value} ${activeMetricConfig.unit}`, activeMetricConfig.label]}
-                      />
-                      {chartAvg > 0 && (
-                        <ReferenceLine 
-                          y={chartAvg} 
-                          stroke="#e5e7eb" 
-                          strokeDasharray="3 3" 
-                          label={{ position: 'insideTopLeft', value: `Avg: ${chartAvg}`, fill: '#9ca3af', fontSize: 12 }} 
-                        />
-                      )}
-                      <Line 
-                        type="monotone" 
-                        dataKey={chartMetric} 
-                        stroke={activeMetricConfig.color} 
-                        strokeWidth={3}
-                        dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }}
-                        activeDot={{ r: 6, strokeWidth: 0 }}
-                        name={activeMetricConfig.label}
-                        connectNulls={true}
-                      />
+                      <XAxis dataKey="date" tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} stroke="#9ca3af" fontSize={12} tickMargin={10} />
+                      <YAxis domain={chartYDomain} stroke="#9ca3af" fontSize={12} tickFormatter={(val) => Math.round(val)} />
+                      <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})} formatter={(value) => [`${value} ${activeMetricConfig.unit}`, activeMetricConfig.label]} />
+                      {chartAvg > 0 && <ReferenceLine y={chartAvg} stroke="#e5e7eb" strokeDasharray="3 3" label={{ position: 'insideTopLeft', value: `Avg: ${chartAvg}`, fill: '#9ca3af', fontSize: 12 }} />}
+                      <Line type="monotone" dataKey={chartMetric} stroke={activeMetricConfig.color} strokeWidth={3} dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }} activeDot={{ r: 6, strokeWidth: 0 }} name={activeMetricConfig.label} connectNulls={true} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
               </div>
             </div>
 
-            {/* Excel-Style Data Grid */}
+            {/* Configurable Excel-Style Data Grid */}
             <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
               <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
                 <h2 className="text-lg font-bold text-gray-800 flex items-center">
                   <Search className="w-5 h-5 mr-2 text-blue-500" />
                   Activity Database
                 </h2>
-                <span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border border-gray-100">
-                  Showing {sortedRuns.length} runs total
-                </span>
+                <div className="flex items-center space-x-3">
+                  <span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border border-gray-100 hidden sm:inline-block">
+                    Showing {sortedRuns.length} runs
+                  </span>
+                  <button 
+                    onClick={() => { setTempColumnConfig(columnConfig); setShowColumnModal(true); }}
+                    className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-1.5 rounded-lg shadow-sm transition-colors"
+                  >
+                    <Settings2 className="w-4 h-4 mr-2" />
+                    Columns
+                  </button>
+                </div>
               </div>
 
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      {['date', 'name', 'distance', 'pace', 'avgHr', 'maxHr'].map((key) => (
+                      {visibleColumns.map((col) => (
                         <th 
-                          key={key}
-                          onClick={() => requestSort(key)}
-                          className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100 transition-colors select-none group"
+                          key={col.key}
+                          onClick={() => requestSort(col.key)}
+                          className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100 transition-colors select-none group whitespace-nowrap"
                         >
                           <div className="flex items-center">
-                            {key === 'avgHr' ? 'Avg HR' : key === 'maxHr' ? 'Max HR' : key}
-                            <SortIcon columnKey={key} />
+                            {col.label}
+                            {sortConfig.key === col.key ? (
+                              sortConfig.direction === 'asc' ? <ChevronUp className="w-4 h-4 ml-1 text-blue-500" /> : <ChevronDown className="w-4 h-4 ml-1 text-blue-500" />
+                            ) : <span className="w-4 h-4 ml-1 inline-block text-transparent group-hover:text-gray-300"><ChevronDown className="w-4 h-4" /></span>}
                           </div>
                         </th>
                       ))}
                     </tr>
                     <tr className="bg-white border-b border-gray-200 shadow-sm">
-                      {['date', 'name', 'distance', 'pace', 'avgHr', 'maxHr'].map((key) => (
-                        <th key={`filter-${key}`} className="px-3 py-2 font-normal">
+                      {visibleColumns.map((col) => (
+                        <th key={`filter-${col.key}`} className="px-3 py-2 font-normal">
                           <input
                             type="text"
                             placeholder={`Filter...`}
-                            value={filters[key]}
-                            onChange={(e) => setFilters(prev => ({ ...prev, [key]: e.target.value }))}
+                            value={filters[col.key] || ''}
+                            onChange={(e) => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
                             className="w-full text-xs p-1.5 border border-gray-200 rounded bg-gray-50 text-gray-700 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all placeholder:text-gray-400"
                           />
                         </th>
@@ -707,9 +704,9 @@ export default function App() {
                   
                   <tbody className="bg-white divide-y divide-gray-100">
                     {loading ? (
-                      <tr><td colSpan="6" className="text-center py-12 text-gray-400">Loading data...</td></tr>
+                      <tr><td colSpan={visibleColumns.length} className="text-center py-12 text-gray-400">Loading data...</td></tr>
                     ) : sortedRuns.length === 0 ? (
-                      <tr><td colSpan="6" className="text-center py-12 text-gray-400">No runs match your filters.</td></tr>
+                      <tr><td colSpan={visibleColumns.length} className="text-center py-12 text-gray-400">No runs match your filters.</td></tr>
                     ) : (
                       sortedRuns.map((run) => (
                         <tr 
@@ -717,31 +714,11 @@ export default function App() {
                           onClick={() => setSelectedRun(run)}
                           className="hover:bg-blue-50/50 transition-colors cursor-pointer group"
                         >
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 group-hover:text-blue-700 transition-colors">
-                            {parseLocalDateString(run.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric'})}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-medium truncate max-w-[200px]" title={run.name}>
-                            {run.name}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {run.distance} <span className="text-xs text-gray-400">mi</span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {run.pace} <span className="text-xs text-gray-400">/mi</span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm">
-                            <span className={`px-2 py-1 rounded font-medium ${
-                              !run.avgHr ? 'text-gray-400' :
-                              run.avgHr > 165 ? 'bg-rose-100 text-rose-700' : 
-                              run.avgHr > 145 ? 'bg-orange-100 text-orange-700' : 
-                              'bg-green-100 text-green-700'
-                            }`}>
-                              {run.avgHr || '--'} {run.avgHr && <span className="text-xs opacity-70">bpm</span>}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                            {run.maxHr || '--'}
-                          </td>
+                          {visibleColumns.map((col) => (
+                            <td key={`${run.id}-${col.key}`} className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 group-hover:text-blue-900 transition-colors">
+                              {renderCellContent(run, col.key)}
+                            </td>
+                          ))}
                         </tr>
                       ))
                     )}
@@ -757,13 +734,8 @@ export default function App() {
           <div className="space-y-6 animate-in fade-in duration-300">
             <div className="flex justify-between items-center bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
               <div>
-                <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-                  <Trophy className="w-6 h-6 mr-2 text-yellow-500" />
-                  Estimated Best Efforts
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  Calculated based on your fastest average pace across all runs that meet or exceed the target distance.
-                </p>
+                <h2 className="text-2xl font-bold text-gray-800 flex items-center"><Trophy className="w-6 h-6 mr-2 text-yellow-500" /> Estimated Best Efforts</h2>
+                <p className="text-sm text-gray-500 mt-1">Calculated based on your fastest average pace across all runs that meet or exceed the target distance.</p>
               </div>
             </div>
 
@@ -803,15 +775,14 @@ export default function App() {
             </div>
           </div>
         )}
-
       </main>
 
-      {/* --- Deep Dive Run Modal --- */}
+      {/* --- Modals Below --- */}
+
+      {/* 1. Deep Dive Run Modal */}
       {selectedRun && (
         <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            
-            {/* Modal Header */}
             <div className="px-6 py-5 border-b border-gray-100 flex justify-between items-start bg-gray-50/50">
               <div>
                 <h3 className="text-2xl font-bold text-gray-900 mb-1 pr-8">{selectedRun.name}</h3>
@@ -820,238 +791,142 @@ export default function App() {
                   {parseLocalDateString(selectedRun.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
                 </p>
               </div>
-              <button 
-                onClick={() => setSelectedRun(null)}
-                className="p-2 bg-gray-100 hover:bg-gray-200 rounded-full text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <button onClick={() => setSelectedRun(null)} className="p-2 bg-gray-100 hover:bg-gray-200 rounded-full text-gray-500 hover:text-gray-700 transition-colors"><X className="w-5 h-5" /></button>
             </div>
-
-            {/* Modal Body (Scrollable) */}
             <div className="flex-1 overflow-y-auto p-6 space-y-8">
-              
-              {/* Primary Stats Grid */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-blue-50/50 border border-blue-100 p-4 rounded-xl">
-                  <p className="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-1 flex items-center">
-                    <MapPin className="w-3.5 h-3.5 mr-1" /> Distance
-                  </p>
+                  <p className="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-1 flex items-center"><MapPin className="w-3.5 h-3.5 mr-1" /> Distance</p>
                   <p className="text-3xl font-black text-gray-900">{selectedRun.distance} <span className="text-sm font-medium text-gray-500">mi</span></p>
                 </div>
                 <div className="bg-indigo-50/50 border border-indigo-100 p-4 rounded-xl">
-                  <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wider mb-1 flex items-center">
-                    <Clock className="w-3.5 h-3.5 mr-1" /> Pace
-                  </p>
+                  <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wider mb-1 flex items-center"><Clock className="w-3.5 h-3.5 mr-1" /> Pace</p>
                   <p className="text-3xl font-black text-gray-900">{selectedRun.pace} <span className="text-sm font-medium text-gray-500">/mi</span></p>
                 </div>
                 <div className="bg-emerald-50/50 border border-emerald-100 p-4 rounded-xl">
-                  <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-1 flex items-center">
-                    <Timer className="w-3.5 h-3.5 mr-1" /> Moving Time
-                  </p>
+                  <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-1 flex items-center"><Timer className="w-3.5 h-3.5 mr-1" /> Moving Time</p>
                   <p className="text-xl font-black text-gray-900 mt-1.5">{selectedRun.movingTime}</p>
                 </div>
                 <div className="bg-amber-50/50 border border-amber-100 p-4 rounded-xl">
-                  <p className="text-xs font-semibold text-amber-600 uppercase tracking-wider mb-1 flex items-center">
-                    <Mountain className="w-3.5 h-3.5 mr-1" /> Elevation
-                  </p>
+                  <p className="text-xs font-semibold text-amber-600 uppercase tracking-wider mb-1 flex items-center"><Mountain className="w-3.5 h-3.5 mr-1" /> Elevation</p>
                   <p className="text-3xl font-black text-gray-900">{selectedRun.elevation} <span className="text-sm font-medium text-gray-500">ft</span></p>
                 </div>
               </div>
-
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Heart Rate Section */}
                 <div className="space-y-4">
-                  <h4 className="text-lg font-bold text-gray-800 flex items-center border-b border-gray-100 pb-2">
-                    <Heart className="w-5 h-5 text-rose-500 mr-2" /> Heart Rate Data
-                  </h4>
+                  <h4 className="text-lg font-bold text-gray-800 flex items-center border-b border-gray-100 pb-2"><Heart className="w-5 h-5 text-rose-500 mr-2" /> Heart Rate Data</h4>
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1">Average HR</p>
-                      <p className="text-2xl font-bold text-gray-900">
-                        {selectedRun.avgHr || '--'} <span className="text-sm text-gray-400 font-normal">bpm</span>
-                      </p>
-                    </div>
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1">Max HR</p>
-                      <p className="text-2xl font-bold text-gray-900">
-                        {selectedRun.maxHr || '--'} <span className="text-sm text-gray-400 font-normal">bpm</span>
-                      </p>
-                    </div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1">Average HR</p><p className="text-2xl font-bold text-gray-900">{selectedRun.avgHr || '--'} <span className="text-sm text-gray-400 font-normal">bpm</span></p></div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1">Max HR</p><p className="text-2xl font-bold text-gray-900">{selectedRun.maxHr || '--'} <span className="text-sm text-gray-400 font-normal">bpm</span></p></div>
                   </div>
                 </div>
-
-                {/* Biometrics & Effort (Pulled from RAW Intervals Data) */}
                 <div className="space-y-4">
-                  <h4 className="text-lg font-bold text-gray-800 flex items-center border-b border-gray-100 pb-2">
-                    <Activity className="w-5 h-5 text-blue-500 mr-2" /> Effort & Metrics
-                  </h4>
+                  <h4 className="text-lg font-bold text-gray-800 flex items-center border-b border-gray-100 pb-2"><Activity className="w-5 h-5 text-blue-500 mr-2" /> Effort & Metrics</h4>
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1 flex items-center">
-                        <Footprints className="w-4 h-4 mr-1.5 text-gray-400" /> Cadence
-                      </p>
-                      <p className="text-xl font-bold text-gray-900">
-                        {selectedRun.raw?.average_cadence ? Math.round(selectedRun.raw.average_cadence * 2) : '--'} <span className="text-xs text-gray-400 font-normal">spm</span>
-                      </p>
-                    </div>
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1 flex items-center">
-                        <Flame className="w-4 h-4 mr-1.5 text-orange-400" /> Calories
-                      </p>
-                      <p className="text-xl font-bold text-gray-900">
-                        {selectedRun.raw?.calories ? selectedRun.raw.calories.toLocaleString() : '--'} <span className="text-xs text-gray-400 font-normal">kcal</span>
-                      </p>
-                    </div>
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1 flex items-center">
-                        <Zap className="w-4 h-4 mr-1.5 text-yellow-500" /> Training Load
-                      </p>
-                      <p className="text-xl font-bold text-gray-900">
-                        {selectedRun.raw?.icu_training_load || '--'}
-                      </p>
-                    </div>
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500 font-medium mb-1 flex items-center">
-                        <TrendingUp className="w-4 h-4 mr-1.5 text-purple-500" /> Intensity
-                      </p>
-                      <p className="text-xl font-bold text-gray-900">
-                        {selectedRun.raw?.icu_intensity ? `${selectedRun.raw.icu_intensity}%` : '--'}
-                      </p>
-                    </div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1 flex items-center"><Footprints className="w-4 h-4 mr-1.5 text-gray-400" /> Cadence</p><p className="text-xl font-bold text-gray-900">{selectedRun.cadence || '--'} <span className="text-xs text-gray-400 font-normal">spm</span></p></div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1 flex items-center"><Flame className="w-4 h-4 mr-1.5 text-orange-400" /> Calories</p><p className="text-xl font-bold text-gray-900">{selectedRun.calories?.toLocaleString() || '--'} <span className="text-xs text-gray-400 font-normal">kcal</span></p></div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1 flex items-center"><Zap className="w-4 h-4 mr-1.5 text-yellow-500" /> Training Load</p><p className="text-xl font-bold text-gray-900">{selectedRun.trainingLoad || '--'}</p></div>
+                    <div className="bg-gray-50 rounded-lg p-4"><p className="text-sm text-gray-500 font-medium mb-1 flex items-center"><TrendingUp className="w-4 h-4 mr-1.5 text-purple-500" /> Intensity</p><p className="text-xl font-bold text-gray-900">{selectedRun.intensity ? `${selectedRun.intensity}%` : '--'}</p></div>
                   </div>
                 </div>
               </div>
-
-              {/* Advanced / Extra Info */}
               <div className="bg-gray-50 rounded-xl p-4 text-sm text-gray-500 flex justify-between items-center">
-                <span>
-                  <strong>Total Elapsed Time:</strong> {formatDuration(selectedRun.raw?.elapsed_time || 0)}
-                </span>
-                {selectedRun.raw?.perceived_exertion && (
-                  <span className="flex items-center">
-                    <strong>RPE:</strong> <span className="ml-2 bg-gray-200 text-gray-800 px-2 py-0.5 rounded-full text-xs font-bold">{selectedRun.raw.perceived_exertion} / 10</span>
-                  </span>
-                )}
+                <span><strong>Total Elapsed Time:</strong> {formatDuration(selectedRun.raw?.elapsed_time || 0)}</span>
+                {selectedRun.rpe && (<span className="flex items-center"><strong>RPE:</strong> <span className="ml-2 bg-gray-200 text-gray-800 px-2 py-0.5 rounded-full text-xs font-bold">{selectedRun.rpe} / 10</span></span>)}
               </div>
-
             </div>
           </div>
         </div>
       )}
 
-      {/* --- KPI Customization Modal --- */}
+      {/* 2. Column Customization Modal */}
+      {showColumnModal && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full flex flex-col max-h-[85vh]">
+            <div className="p-6 border-b border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-1">Customize Table Columns</h3>
+              <p className="text-sm text-gray-500">Toggle visibility and use the arrows to reorder.</p>
+            </div>
+            
+            <div className="overflow-y-auto p-6 space-y-2 flex-1">
+              {tempColumnConfig.map((col, index) => (
+                <div key={col.key} className={`flex items-center justify-between p-3 rounded-lg border transition-all ${col.visible ? 'border-blue-200 bg-white shadow-sm' : 'border-gray-200 bg-gray-50 opacity-60'}`}>
+                  <div className="flex items-center space-x-3 flex-1">
+                    <button onClick={() => toggleColumnVisibility(index)} className="text-gray-400 hover:text-blue-600 transition-colors">
+                      {col.visible ? <Eye className="w-5 h-5 text-blue-500" /> : <EyeOff className="w-5 h-5" />}
+                    </button>
+                    <span className={`text-sm font-medium ${col.visible ? 'text-gray-900' : 'text-gray-500'}`}>{col.label}</span>
+                  </div>
+                  <div className="flex items-center space-x-1">
+                    <button onClick={() => moveColumn(index, 'up')} disabled={index === 0} className="p-1 text-gray-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-gray-400 transition-colors"><ArrowUp className="w-4 h-4" /></button>
+                    <button onClick={() => moveColumn(index, 'down')} disabled={index === tempColumnConfig.length - 1} className="p-1 text-gray-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-gray-400 transition-colors"><ArrowDown className="w-4 h-4" /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-6 border-t border-gray-100 bg-gray-50 rounded-b-2xl flex space-x-3">
+              <button onClick={saveColumnPreferences} className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors">Save Layout</button>
+              <button onClick={() => setShowColumnModal(false)} className="flex-1 bg-gray-200 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-300 transition-colors">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. KPI Customization Modal */}
       {showKpiModal && (
         <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
             <h3 className="text-xl font-bold text-gray-900 mb-2">Customize KPIs</h3>
-            <p className="text-sm text-gray-500 mb-6">
-              Select which metrics you want to see pinned to the top of your dashboard.
-            </p>
-
+            <p className="text-sm text-gray-500 mb-6">Select which metrics you want to see pinned to the top of your dashboard.</p>
             <div className="space-y-3 mb-6">
               {[
-                { id: 'totalDistance', label: 'Total Distance', icon: MapPin },
-                { id: 'totalRuns', label: 'Total Runs', icon: Clock },
-                { id: 'avgHr', label: 'Average HR', icon: Heart },
-                { id: 'hrTrend', label: 'HR Trend', icon: TrendingDown },
-                { id: 'maxHr', label: 'Highest Max HR', icon: Activity },
-                { id: 'totalElevation', label: 'Total Elevation Gain', icon: TrendingUp },
+                { id: 'totalDistance', label: 'Total Distance', icon: MapPin }, { id: 'totalRuns', label: 'Total Runs', icon: Clock },
+                { id: 'avgHr', label: 'Average HR', icon: Heart }, { id: 'hrTrend', label: 'HR Trend', icon: TrendingDown },
+                { id: 'maxHr', label: 'Highest Max HR', icon: Activity }, { id: 'totalElevation', label: 'Total Elevation Gain', icon: TrendingUp },
               ].map((kpi) => {
                 const Icon = kpi.icon;
                 const isActive = tempKpiConfig[kpi.id];
                 return (
-                  <button
-                    key={kpi.id}
-                    onClick={() => setTempKpiConfig(prev => ({ ...prev, [kpi.id]: !prev[kpi.id] }))}
-                    className={`w-full flex items-center justify-between p-3 rounded-lg border transition-all ${
-                      isActive ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300'
-                    }`}
-                  >
+                  <button key={kpi.id} onClick={() => setTempKpiConfig(prev => ({ ...prev, [kpi.id]: !prev[kpi.id] }))} className={`w-full flex items-center justify-between p-3 rounded-lg border transition-all ${isActive ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300'}`}>
                     <div className="flex items-center space-x-3">
                       <Icon className={`w-5 h-5 ${isActive ? 'text-blue-600' : 'text-gray-400'}`} />
-                      <span className={`text-sm font-medium ${isActive ? 'text-blue-900' : 'text-gray-600'}`}>
-                        {kpi.label}
-                      </span>
+                      <span className={`text-sm font-medium ${isActive ? 'text-blue-900' : 'text-gray-600'}`}>{kpi.label}</span>
                     </div>
                     {isActive && <Check className="w-5 h-5 text-blue-600" />}
                   </button>
                 )
               })}
             </div>
-
             <div className="flex space-x-3">
-              <button 
-                onClick={saveKpiPreferences}
-                className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Save Layout
-              </button>
-              <button 
-                onClick={() => setShowKpiModal(false)}
-                className="flex-1 bg-gray-100 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                Cancel
-              </button>
+              <button onClick={saveKpiPreferences} className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors">Save Layout</button>
+              <button onClick={() => setShowKpiModal(false)} className="flex-1 bg-gray-100 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- Settings Modal (Intervals.icu) --- */}
+      {/* 4. Settings Modal (Intervals.icu) */}
       {showSettings && (
         <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
             <h3 className="text-xl font-bold text-gray-900 mb-2">Connect Data Source</h3>
-            <p className="text-sm text-gray-500 mb-6">
-              Connect to Intervals.icu to automatically import your Coros runs.
-            </p>
+            <p className="text-sm text-gray-500 mb-6">Connect to Intervals.icu to automatically import your Coros runs.</p>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Athlete ID</label>
-                <input 
-                  type="text" 
-                  placeholder="e.g. i12345"
-                  value={athleteId}
-                  onChange={(e) => setAthleteId(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                />
+                <input type="text" placeholder="e.g. i12345" value={athleteId} onChange={(e) => setAthleteId(e.target.value)} className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
-                <input 
-                  type="password" 
-                  placeholder="Paste your API Key"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                />
-                <p className="text-xs text-gray-400 mt-2">
-                  Found at the bottom of your Intervals.icu Settings page.
-                </p>
+                <input type="password" placeholder="Paste your API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
               </div>
-              
               {apiError && (
-                <div className="p-3 bg-red-50 text-red-600 rounded-lg text-sm flex items-start">
-                  <AlertCircle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
-                  <p>{apiError}</p>
-                </div>
+                <div className="p-3 bg-red-50 text-red-600 rounded-lg text-sm flex items-start"><AlertCircle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" /><p>{apiError}</p></div>
               )}
-              
               <div className="pt-4 flex space-x-3">
-                <button 
-                  onClick={() => fetchIntervalsData(athleteId, apiKey)}
-                  disabled={!athleteId || !apiKey}
-                  className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Sync Data
-                </button>
-                <button 
-                  onClick={() => setShowSettings(false)}
-                  className="flex-1 bg-gray-100 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-200 transition-colors"
-                >
-                  Cancel
-                </button>
+                <button onClick={() => fetchIntervalsData(athleteId, apiKey)} disabled={!athleteId || !apiKey} className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Sync Data</button>
+                <button onClick={() => setShowSettings(false)} className="flex-1 bg-gray-100 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
               </div>
             </div>
           </div>
