@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend, ComposedChart } from 'recharts';
-import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain, Settings2, ArrowUp, ArrowDown, Eye, EyeOff, BarChart3 } from 'lucide-react';
+import { LineChart, Line, BarChart, Bar, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from 'recharts';
+import { Activity, Heart, TrendingDown, TrendingUp, Settings, ChevronDown, ChevronUp, Search, Calendar, MapPin, Clock, AlertCircle, Layout, User, LogOut, Check, X, Trophy, Flame, Zap, Footprints, Timer, Mountain, Settings2, ArrowUp, ArrowDown, Eye, EyeOff, BarChart3, LineChart as LineChartIcon } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -12,28 +12,13 @@ const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-// --- Utility Functions for Data Conversion ---
+// --- Utility Functions ---
 const formatPace = (speedMetersPerSecond) => {
-  if (!speedMetersPerSecond) return '0:00';
+  if (!speedMetersPerSecond || speedMetersPerSecond <= 0) return '0:00';
   const milesPerHour = speedMetersPerSecond * 2.23694;
   const minutesPerMile = 60 / milesPerHour;
   const minutes = Math.floor(minutesPerMile);
   const seconds = Math.floor((minutesPerMile - minutes) * 60);
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-};
-
-// Converts speed (m/s) directly into total seconds per mile for accurate charting math
-const speedToSecondsPerMile = (speedMetersPerSecond) => {
-  if (!speedMetersPerSecond || speedMetersPerSecond <= 0) return 0;
-  const milesPerHour = speedMetersPerSecond * 2.23694;
-  return Math.round((60 / milesPerHour) * 60);
-};
-
-// Converts total seconds back to a M:SS string for chart labels
-const formatSecondsToPaceString = (totalSeconds) => {
-  if (!totalSeconds) return '0:00';
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.round(totalSeconds % 60);
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 };
 
@@ -49,11 +34,33 @@ const formatDuration = (seconds) => {
 
 const parseLocalDateString = (dateStr) => new Date(dateStr + 'T12:00:00');
 
+// --- Pulse+ Algorithm ---
+const calculatePulsePlus = (avgHr, speedMps, distanceMi) => {
+  if (!avgHr || !speedMps || !distanceMi) return { total: 0, hr: 0, pace: 0, dist: 0 };
+  
+  // HR (50%): 50 pts for <= 130bpm, 0 pts for >= 180bpm
+  const hrScore = Math.max(0, Math.min(50, 50 * (180 - avgHr) / 50));
+  
+  // Pace (30%): 0 pts for ~13:24/mi (2.0 m/s), 30 pts for ~5:57/mi (4.5 m/s)
+  const paceScore = Math.max(0, Math.min(30, 30 * (speedMps - 2.0) / 2.5));
+  
+  // Distance (20%): 0 pts for 1 mile, 20 pts for 15+ miles
+  const distScore = Math.max(0, Math.min(20, 20 * (distanceMi - 1) / 14));
+  
+  return {
+    total: Math.round(hrScore + paceScore + distScore),
+    hr: Math.round(hrScore),
+    pace: Math.round(paceScore),
+    dist: Math.round(distScore)
+  };
+};
+
 const DEFAULT_KPI_CONFIG = {
   totalDistance: true,
   totalRuns: true,
   avgHr: true,
-  hrTrend: true,
+  pulsePlus: true, // New KPI enabled by default
+  hrTrend: false,
   maxHr: false,
   totalElevation: false
 };
@@ -61,12 +68,13 @@ const DEFAULT_KPI_CONFIG = {
 const DEFAULT_COLUMNS = [
   { key: 'date', label: 'Date', visible: true },
   { key: 'name', label: 'Name', visible: true },
+  { key: 'pulsePlus', label: 'Pulse+', visible: true }, // New Column enabled by default
   { key: 'distance', label: 'Distance', visible: true },
   { key: 'pace', label: 'Pace', visible: true },
   { key: 'movingTime', label: 'Time', visible: false },
   { key: 'elevation', label: 'Elevation', visible: false },
   { key: 'avgHr', label: 'Avg HR', visible: true },
-  { key: 'maxHr', label: 'Max HR', visible: true },
+  { key: 'maxHr', label: 'Max HR', visible: false },
   { key: 'cadence', label: 'Cadence', visible: false },
   { key: 'calories', label: 'Calories', visible: false },
   { key: 'trainingLoad', label: 'Load', visible: false },
@@ -76,11 +84,10 @@ const DEFAULT_COLUMNS = [
 
 const CHART_METRICS = {
   avgHr: { label: 'Average HR', color: '#f43f5e', unit: 'bpm', icon: Heart },
-  maxHr: { label: 'Max HR', color: '#a855f7', unit: 'bpm', icon: Activity },
-  paceSeconds: { label: 'Average Pace', color: '#10b981', unit: '/mi', icon: Timer },
+  rawSpeed: { label: 'Average Pace', color: '#10b981', unit: '/mi', icon: Clock }, // Added Pace Trend
   distance: { label: 'Distance', color: '#3b82f6', unit: 'mi', icon: MapPin },
   elevation: { label: 'Elevation Gain', color: '#f59e0b', unit: 'ft', icon: TrendingUp },
-  cadence: { label: 'Average Cadence', color: '#6366f1', unit: 'spm', icon: Footprints },
+  cadence: { label: 'Average Cadence', color: '#14b8a6', unit: 'spm', icon: Footprints },
   trainingLoad: { label: 'Training Load', color: '#eab308', unit: '', icon: Zap }
 };
 
@@ -116,103 +123,15 @@ export default function App() {
   const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
   const [filters, setFilters] = useState({});
 
-  // Intervals.icu Auth State
+  // Intervals.icu Auth State (HARDCODED for Vercel auto-sync bypass)
   const [showSettings, setShowSettings] = useState(false);
   const [athleteId, setAthleteId] = useState('i601186');
   const [apiKey, setApiKey] = useState('12qg950fiv6s1r0dqtq1203y1');
   const [apiError, setApiError] = useState('');
 
-  // --- 1. Firebase Auth Initialization ---
+  // Fallback Auto-Sync for Live Environment
   useEffect(() => {
-    if (!auth) return;
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Auth init error", err);
-      }
-    };
-    initAuth();
-    
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- 2. Load User Preferences from Firestore ---
-  useEffect(() => {
-    if (!user || !db) return;
-
-    // Load KPI Preferences
-    const prefsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'kpi');
-    const unsubscribeKpi = onSnapshot(prefsRef, (snap) => {
-      if (snap.exists()) setKpiConfig(snap.data());
-    }, (error) => console.error("Error fetching KPI prefs:", error));
-
-    // Load Column Preferences
-    const columnsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'columns');
-    const unsubscribeColumns = onSnapshot(columnsRef, (snap) => {
-      if (snap.exists()) {
-        const savedCols = snap.data().columns;
-        // Merge saved settings with default definitions in case new columns are added later
-        const mergedCols = savedCols.map(savedCol => {
-          const defaultCol = DEFAULT_COLUMNS.find(c => c.key === savedCol.key);
-          return { ...defaultCol, ...savedCol };
-        }).filter(c => c.key); 
-        
-        // Add any new default columns that weren't in saved settings
-        const missingCols = DEFAULT_COLUMNS.filter(dc => !savedCols.find(sc => sc.key === dc.key));
-        
-        setColumnConfig([...mergedCols, ...missingCols]);
-      }
-    }, (error) => console.error("Error fetching Column prefs:", error));
-
-    // Load Intervals API Credentials and Auto-Sync
-    const intervalsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals');
-    const unsubscribeIntervals = onSnapshot(intervalsRef, (snap) => {
-      let currentId = athleteId;
-      let currentKey = apiKey;
-
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data.athleteId) {
-          setAthleteId(data.athleteId);
-          currentId = data.athleteId;
-        }
-        if (data.apiKey) {
-          setApiKey(data.apiKey);
-          currentKey = data.apiKey;
-        }
-      }
-      
-      // Auto-sync precisely once after we attempt to load saved credentials
-      if (!hasAutoSynced.current) {
-        hasAutoSynced.current = true;
-        fetchIntervalsData(currentId, currentKey);
-      }
-    }, (error) => {
-      console.error("Error fetching Intervals credentials:", error);
-      if (!hasAutoSynced.current) {
-        hasAutoSynced.current = true;
-        fetchIntervalsData(athleteId, apiKey);
-      }
-    });
-
-    return () => {
-      unsubscribeKpi();
-      unsubscribeColumns();
-      unsubscribeIntervals();
-    };
-  }, [user]);
-
-  // Fallback Auto-Sync if Firebase is completely disabled
-  useEffect(() => {
-    if (!auth && !hasAutoSynced.current) {
+    if (!hasAutoSynced.current && athleteId && apiKey) {
       hasAutoSynced.current = true;
       fetchIntervalsData(athleteId, apiKey);
     }
@@ -222,21 +141,11 @@ export default function App() {
   const saveKpiPreferences = async () => {
     setKpiConfig(tempKpiConfig);
     setShowKpiModal(false);
-    if (user && db) {
-      try {
-        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'kpi'), tempKpiConfig);
-      } catch (error) { console.error("Error saving KPI preferences:", error); }
-    }
   };
 
   const saveColumnPreferences = async () => {
     setColumnConfig(tempColumnConfig);
     setShowColumnModal(false);
-    if (user && db) {
-      try {
-        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'columns'), { columns: tempColumnConfig });
-      } catch (error) { console.error("Error saving Column preferences:", error); }
-    }
   };
 
   const moveColumn = (index, direction) => {
@@ -276,54 +185,49 @@ export default function App() {
       });
       
       if (!response.ok) {
-        let errorMsg = `API Error ${response.status}`;
-        if (response.status === 401) errorMsg = "401 Unauthorized: Check your API Key.";
-        if (response.status === 404) errorMsg = "404 Not Found: Check your Athlete ID.";
-        throw new Error(errorMsg);
+        throw new Error(`API Error ${response.status}: Unauthorized or Not Found.`);
       }
       
       const data = await response.json();
-      if (!Array.isArray(data)) throw new Error("Received unexpected data format.");
-      
-      const foundTypes = new Set();
       
       const formattedRuns = data
-        .filter(activity => {
-          if (!activity.type) return false;
-          foundTypes.add(activity.type);
-          return String(activity.type).toLowerCase().includes('run'); 
-        })
-        .map(activity => ({
-          id: activity.id || Math.random().toString(),
-          date: (activity.start_date_local || activity.start_date || new Date().toISOString()).split('T')[0],
-          name: activity.name || 'Unnamed Run',
-          distance: parseFloat(metersToMiles(activity.distance || 0)),
-          pace: formatPace(activity.average_speed || 0),
-          paceSeconds: speedToSecondsPerMile(activity.average_speed || 0),
-          rawSpeed: activity.average_speed || 0,
-          movingTime: formatDuration(activity.moving_time || activity.elapsed_time || 0),
-          avgHr: activity.average_heartrate ? Math.round(activity.average_heartrate) : null,
-          maxHr: activity.max_heartrate ? Math.round(activity.max_heartrate) : null,
-          elevation: metersToFeet(activity.total_elevation_gain || 0),
-          cadence: activity.average_cadence ? Math.round(activity.average_cadence * 2) : null,
-          calories: activity.calories ? Math.round(activity.calories) : null,
-          trainingLoad: activity.icu_training_load || null,
-          intensity: activity.icu_intensity ? Math.round(activity.icu_intensity) : null,
-          rpe: activity.perceived_exertion || null,
-          source: 'Intervals.icu',
-          raw: activity 
-        }));
+        .filter(activity => activity.type && String(activity.type).toLowerCase().includes('run'))
+        .map(activity => {
+          const distanceMi = parseFloat(metersToMiles(activity.distance || 0));
+          const avgHr = activity.average_heartrate ? Math.round(activity.average_heartrate) : null;
+          const rawSpeed = activity.average_speed || 0;
+          
+          // Calculate Pulse+ 
+          const pulsePlusData = calculatePulsePlus(avgHr, rawSpeed, distanceMi);
+
+          return {
+            id: activity.id || Math.random().toString(),
+            date: (activity.start_date_local || activity.start_date || new Date().toISOString()).split('T')[0],
+            name: activity.name || 'Unnamed Run',
+            distance: distanceMi,
+            pace: formatPace(rawSpeed),
+            rawSpeed: rawSpeed, 
+            movingTime: formatDuration(activity.moving_time || activity.elapsed_time || 0),
+            avgHr: avgHr,
+            maxHr: activity.max_heartrate ? Math.round(activity.max_heartrate) : null,
+            elevation: metersToFeet(activity.total_elevation_gain || 0),
+            cadence: activity.average_cadence ? Math.round(activity.average_cadence * 2) : null,
+            calories: activity.calories ? Math.round(activity.calories) : null,
+            trainingLoad: activity.icu_training_load || null,
+            intensity: activity.icu_intensity ? Math.round(activity.icu_intensity) : null,
+            rpe: activity.perceived_exertion || null,
+            pulsePlus: pulsePlusData.total,
+            pulsePlusBreakdown: pulsePlusData, // Keep breakdown for tooltips
+            source: 'Intervals.icu',
+            raw: activity 
+          };
+        });
 
       if (formattedRuns.length === 0) {
-        setApiError(`Connected successfully, but 0 running activities were found. Activities found: ${Array.from(foundTypes).join(', ') || 'None'}`);
+        setApiError(`Connected successfully, but 0 running activities were found.`);
       } else {
         setRuns(formattedRuns);
         setShowSettings(false);
-        if (user && db) {
-          try {
-            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'preferences', 'intervals'), { athleteId: cleanId, apiKey: cleanKey }, { merge: true });
-          } catch (err) { console.error("Failed to save credentials:", err); }
-        }
       }
     } catch (err) {
       setApiError(err.message);
@@ -346,30 +250,42 @@ export default function App() {
   const stats = useMemo(() => {
     const activeRuns = timeFilteredRuns;
     const runsWithHr = activeRuns.filter(r => r.avgHr);
-    const maxHrList = activeRuns.map(r => r.maxHr).filter(Boolean);
+    const runsWithPulse = activeRuns.filter(r => r.pulsePlus > 0);
     
     if (runsWithHr.length === 0) {
       return { 
-        avg: 0, trend: 0, totalRuns: activeRuns.length, 
+        avg: 0, trend: 0, pulseAvg: 0, pulseTrend: 0, totalRuns: activeRuns.length, 
         totalDistance: Math.round(activeRuns.reduce((s, r) => s + r.distance, 0)),
         maxHr: 0, totalElevation: Math.round(activeRuns.reduce((s, r) => s + r.elevation, 0))
       };
     }
     
-    const totalHr = runsWithHr.reduce((sum, run) => sum + run.avgHr, 0);
-    const overallAvg = Math.round(totalHr / runsWithHr.length);
     const midPoint = Math.floor(runsWithHr.length / 2);
     const recent = runsWithHr.slice(0, midPoint || 1); 
     const previous = runsWithHr.slice(midPoint, runsWithHr.length);
-    const recentAvg = recent.length ? recent.reduce((s, r) => s + r.avgHr, 0) / recent.length : overallAvg;
-    const previousAvg = previous.length ? previous.reduce((s, r) => s + r.avgHr, 0) / previous.length : overallAvg;
     
+    // HR Stats
+    const totalHr = runsWithHr.reduce((sum, run) => sum + run.avgHr, 0);
+    const overallAvgHr = Math.round(totalHr / runsWithHr.length);
+    const recentAvgHr = recent.length ? recent.reduce((s, r) => s + r.avgHr, 0) / recent.length : overallAvgHr;
+    const previousAvgHr = previous.length ? previous.reduce((s, r) => s + r.avgHr, 0) / previous.length : overallAvgHr;
+
+    // Pulse+ Stats
+    const totalPulse = runsWithPulse.reduce((sum, run) => sum + run.pulsePlus, 0);
+    const overallPulse = runsWithPulse.length ? Math.round(totalPulse / runsWithPulse.length) : 0;
+    const recentPulse = runsWithPulse.slice(0, midPoint || 1);
+    const previousPulse = runsWithPulse.slice(midPoint, runsWithPulse.length);
+    const recentAvgPulse = recentPulse.length ? recentPulse.reduce((s, r) => s + r.pulsePlus, 0) / recentPulse.length : overallPulse;
+    const prevAvgPulse = previousPulse.length ? previousPulse.reduce((s, r) => s + r.pulsePlus, 0) / previousPulse.length : overallPulse;
+
     return {
-      avg: overallAvg,
-      trend: Math.round(recentAvg - previousAvg),
+      avg: overallAvgHr,
+      trend: Math.round(recentAvgHr - previousAvgHr),
+      pulseAvg: overallPulse,
+      pulseTrend: Math.round(recentAvgPulse - prevAvgPulse),
       totalRuns: activeRuns.length,
       totalDistance: Math.round(activeRuns.reduce((s, r) => s + r.distance, 0)),
-      maxHr: maxHrList.length ? Math.max(...maxHrList) : 0,
+      maxHr: Math.max(...activeRuns.map(r => r.maxHr).filter(Boolean)),
       totalElevation: Math.round(activeRuns.reduce((s, r) => s + r.elevation, 0))
     };
   }, [timeFilteredRuns]);
@@ -378,42 +294,16 @@ export default function App() {
   const activeMetricConfig = CHART_METRICS[chartMetric];
   const MetricIcon = activeMetricConfig.icon;
   const chartData = useMemo(() => [...timeFilteredRuns].reverse(), [timeFilteredRuns]);
-  
-  // Calculate dynamic average line for the selected metric
   const chartAvg = useMemo(() => {
-    const validData = chartData.filter(r => typeof r[chartMetric] === 'number' && r[chartMetric] > 0);
+    const validData = chartData.filter(r => typeof r[chartMetric] === 'number');
     if (validData.length === 0) return 0;
     const rawAvg = validData.reduce((sum, r) => sum + r[chartMetric], 0) / validData.length;
-    
-    // Formatting handles specific rounding for distance, pace, vs whole numbers
-    if (chartMetric === 'distance') return parseFloat(rawAvg.toFixed(2));
-    if (chartMetric === 'paceSeconds') return Math.round(rawAvg);
-    return Math.round(rawAvg);
+    return ['distance', 'rawSpeed'].includes(chartMetric) ? parseFloat(rawAvg.toFixed(2)) : Math.round(rawAvg);
   }, [chartData, chartMetric]);
 
-  // Set chart scaling domains
-  // Note: Pace is inverted (reversed) so that "faster" (lower seconds) visually appears higher on the graph.
-  const getChartYDomain = () => {
-    if (chartMetric === 'paceSeconds') return ['auto', 'auto']; // Handled explicitly by reversed prop on YAxis
-    if (['avgHr', 'maxHr', 'cadence'].includes(chartMetric)) return ['dataMin - 5', 'dataMax + 5'];
-    return [0, 'auto'];
-  };
+  const chartYDomain = ['avgHr', 'maxHr', 'cadence', 'rawSpeed'].includes(chartMetric) ? ['dataMin - 5', 'dataMax + 5'] : [0, 'auto'];
 
-  // Tooltip Formatter to gracefully handle Pace strings vs Numeric values
-  const tooltipFormatter = (value, name, props) => {
-    if (chartMetric === 'paceSeconds') {
-      return [`${formatSecondsToPaceString(value)} /mi`, activeMetricConfig.label];
-    }
-    return [`${value} ${activeMetricConfig.unit}`, activeMetricConfig.label];
-  };
-
-  // Tick Formatter for Y Axis
-  const yAxisTickFormatter = (val) => {
-    if (chartMetric === 'paceSeconds') return formatSecondsToPaceString(val);
-    return Math.round(val);
-  };
-
-  // --- Best Efforts Calculation ---
+  // Best Efforts
   const bestEfforts = useMemo(() => {
     const targets = [
       { name: '1 Mile', distanceMi: 1 }, { name: '5K', distanceMi: 3.10686 },
@@ -424,15 +314,9 @@ export default function App() {
     return targets.map(target => {
       const eligibleRuns = runs.filter(r => r.distance >= target.distanceMi && r.rawSpeed > 0);
       if (eligibleRuns.length === 0) return { ...target, time: '--', pace: '--', date: null, runName: null };
-      
       const bestRun = eligibleRuns.reduce((fastest, current) => (current.rawSpeed > fastest.rawSpeed) ? current : fastest);
       const estimatedSeconds = (target.distanceMi * 1609.34) / bestRun.rawSpeed;
-
-      return {
-        ...target,
-        time: formatDuration(estimatedSeconds), pace: bestRun.pace,
-        date: bestRun.date, runName: bestRun.name
-      };
+      return { ...target, time: formatDuration(estimatedSeconds), pace: bestRun.pace, date: bestRun.date, runName: bestRun.name };
     });
   }, [runs]);
 
@@ -455,16 +339,10 @@ export default function App() {
       sortableRuns.sort((a, b) => {
         let aValue = a[sortConfig.key];
         let bValue = b[sortConfig.key];
-        
-        // Ensure Pace is sorted numerically by seconds, not alphabetically by string
-        if (sortConfig.key === 'pace') {
-          aValue = a.paceSeconds || 0;
-          bValue = b.paceSeconds || 0;
-        } else if (['distance', 'avgHr', 'maxHr', 'elevation', 'cadence', 'calories', 'trainingLoad', 'intensity', 'rpe'].includes(sortConfig.key)) {
+        if (['distance', 'avgHr', 'maxHr', 'elevation', 'cadence', 'calories', 'trainingLoad', 'intensity', 'rpe', 'pulsePlus'].includes(sortConfig.key)) {
           aValue = parseFloat(aValue) || 0;
           bValue = parseFloat(bValue) || 0;
         }
-
         if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
         if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
         return 0;
@@ -492,6 +370,23 @@ export default function App() {
           {run.avgHr || '--'} {run.avgHr && <span className="text-xs opacity-70">bpm</span>}
         </span>
       );
+      case 'pulsePlus': return (
+        <div className="relative group inline-block">
+          <span className={`px-2 py-1 rounded font-bold cursor-help transition-colors ${!run.pulsePlus ? 'text-gray-400' : run.pulsePlus > 80 ? 'bg-green-100 text-green-800 hover:bg-green-200' : run.pulsePlus > 60 ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+            {run.pulsePlus || '--'}
+          </span>
+          {/* Tooltip Breakdown for Pulse+ in Table */}
+          {run.pulsePlus > 0 && (
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-gray-900 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+              <p className="font-bold text-sm mb-1 text-center border-b border-gray-700 pb-1">Pulse+ Breakdown</p>
+              <div className="flex justify-between py-0.5"><span className="text-gray-300">Heart Rate:</span> <span className="font-bold">{run.pulsePlusBreakdown.hr} / 50</span></div>
+              <div className="flex justify-between py-0.5"><span className="text-gray-300">Pace:</span> <span className="font-bold">{run.pulsePlusBreakdown.pace} / 30</span></div>
+              <div className="flex justify-between py-0.5"><span className="text-gray-300">Distance:</span> <span className="font-bold">{run.pulsePlusBreakdown.dist} / 20</span></div>
+              <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-gray-900 rotate-45"></div>
+            </div>
+          )}
+        </div>
+      );
       case 'maxHr': return run.maxHr || '--';
       case 'cadence': return run.cadence ? <>{run.cadence} <span className="text-xs text-gray-400">spm</span></> : '--';
       case 'calories': return run.calories ? <>{run.calories.toLocaleString()} <span className="text-xs text-gray-400">kcal</span></> : '--';
@@ -513,49 +408,25 @@ export default function App() {
             <h1 className="text-xl font-bold text-gray-800">Runner's Data Hub</h1>
           </div>
           <div className="flex items-center space-x-3 w-full sm:w-auto justify-between sm:justify-end">
-            <button 
-              onClick={() => setShowSettings(true)}
-              className="flex items-center space-x-2 text-sm font-medium text-gray-600 hover:text-blue-600 bg-gray-100 hover:bg-blue-50 px-4 py-2 rounded-lg transition-colors"
-            >
+            <button onClick={() => setShowSettings(true)} className="flex items-center space-x-2 text-sm font-medium text-gray-600 hover:text-blue-600 bg-gray-100 hover:bg-blue-50 px-4 py-2 rounded-lg transition-colors">
               <Settings className="w-4 h-4" />
               <span className="hidden sm:inline">Data Source</span>
             </button>
           </div>
         </div>
 
-        <div className="flex space-x-6 border-b border-gray-200 mt-2">
-          <button 
-            onClick={() => setActiveTab('dashboard')}
-            className={`pb-3 text-sm font-semibold transition-colors ${activeTab === 'dashboard' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}
-          >
+        <div className="flex space-x-6 border-b border-gray-200 mt-2 overflow-x-auto hide-scrollbar">
+          <button onClick={() => setActiveTab('dashboard')} className={`pb-3 text-sm font-semibold transition-colors whitespace-nowrap ${activeTab === 'dashboard' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}>
             Dashboard & History
           </button>
-          <button 
-            onClick={() => setActiveTab('analytics')}
-            className={`pb-3 text-sm font-semibold transition-colors ${activeTab === 'analytics' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}
-          >
-            Advanced Analytics
-          </button>
-          <button 
-            onClick={() => setActiveTab('best-efforts')}
-            className={`pb-3 text-sm font-semibold transition-colors ${activeTab === 'best-efforts' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}
-          >
+          <button onClick={() => setActiveTab('best-efforts')} className={`pb-3 text-sm font-semibold transition-colors whitespace-nowrap ${activeTab === 'best-efforts' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}>
             Estimated Best Efforts
+          </button>
+          <button onClick={() => setActiveTab('analytics')} className={`pb-3 text-sm font-semibold transition-colors whitespace-nowrap ${activeTab === 'analytics' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-800'}`}>
+            Advanced Analytics
           </button>
         </div>
       </header>
-
-      {loginError && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
-          <div className="bg-red-50 border border-red-200 p-4 rounded-lg shadow-sm flex items-start justify-between">
-            <div className="flex items-start">
-              <AlertCircle className="w-5 h-5 text-red-500 mr-3 flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-red-800">{loginError}</p>
-            </div>
-            <button onClick={() => setLoginError('')} className="text-red-400 hover:text-red-600 p-1"><X className="w-4 h-4" /></button>
-          </div>
-        </div>
-      )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6 space-y-8">
         
@@ -566,20 +437,12 @@ export default function App() {
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center space-y-4 sm:space-y-0">
               <h2 className="text-2xl font-bold text-gray-800">Performance Overview</h2>
               <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={() => { setTempKpiConfig(kpiConfig); setShowKpiModal(true); }}
-                  className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm transition-colors"
-                >
-                  <Layout className="w-4 h-4 mr-2" />
-                  Customize KPIs
+                <button onClick={() => { setTempKpiConfig(kpiConfig); setShowKpiModal(true); }} className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm transition-colors">
+                  <Layout className="w-4 h-4 mr-2" /> Customize KPIs
                 </button>
                 <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
                   <div className="pl-3 pr-2 py-1.5 text-gray-400"><Calendar className="w-4 h-4" /></div>
-                  <select
-                    value={timeFrame}
-                    onChange={(e) => setTimeFrame(e.target.value)}
-                    className="bg-transparent text-sm font-medium text-gray-700 py-1.5 pr-8 pl-1 outline-none cursor-pointer hover:text-blue-600 transition-colors"
-                  >
+                  <select value={timeFrame} onChange={(e) => setTimeFrame(e.target.value)} className="bg-transparent text-sm font-medium text-gray-700 py-1.5 pr-8 pl-1 outline-none cursor-pointer hover:text-blue-600 transition-colors">
                     <option value="All Time">All Time</option>
                     <option value="Last Year">Last Year</option>
                     <option value="Last Month">Last Month</option>
@@ -594,28 +457,35 @@ export default function App() {
               {kpiConfig.totalDistance && (
                 <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-blue-50 p-3 rounded-full text-blue-600"><MapPin className="w-6 h-6" /></div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-500">Total Distance</p>
-                    <p className="text-2xl font-bold text-gray-900">{stats.totalDistance} <span className="text-sm font-normal text-gray-500">mi</span></p>
-                  </div>
+                  <div><p className="text-sm font-medium text-gray-500">Total Distance</p><p className="text-2xl font-bold text-gray-900">{stats.totalDistance} <span className="text-sm font-normal text-gray-500">mi</span></p></div>
                 </div>
               )}
               {kpiConfig.totalRuns && (
                 <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-green-50 p-3 rounded-full text-green-600"><Clock className="w-6 h-6" /></div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-500">Total Runs</p>
-                    <p className="text-2xl font-bold text-gray-900">{stats.totalRuns}</p>
-                  </div>
+                  <div><p className="text-sm font-medium text-gray-500">Total Runs</p><p className="text-2xl font-bold text-gray-900">{stats.totalRuns}</p></div>
                 </div>
               )}
               {kpiConfig.avgHr && (
                 <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-rose-50 p-3 rounded-full text-rose-600"><Heart className="w-6 h-6" /></div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-500">Average HR</p>
-                    <p className="text-2xl font-bold text-gray-900">{stats.avg || '--'} <span className="text-sm font-normal text-gray-500">bpm</span></p>
+                  <div><p className="text-sm font-medium text-gray-500">Average HR</p><p className="text-2xl font-bold text-gray-900">{stats.avg || '--'} <span className="text-sm font-normal text-gray-500">bpm</span></p></div>
+                </div>
+              )}
+              {/* Pulse+ KPI */}
+              {kpiConfig.pulsePlus && (
+                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex flex-col justify-center">
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-sm font-medium text-gray-500">Avg Pulse+ Score</p>
+                    {stats.pulseTrend === 0 ? (
+                      <span className="text-xs font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded-full">Stable</span>
+                    ) : stats.pulseTrend > 0 ? (
+                      <span className="flex items-center text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full"><TrendingUp className="w-3 h-3 mr-1" /> +{Math.abs(stats.pulseTrend)} pts</span>
+                    ) : (
+                      <span className="flex items-center text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-full"><TrendingDown className="w-3 h-3 mr-1" /> {stats.pulseTrend} pts</span>
+                    )}
                   </div>
+                  <p className="text-2xl font-black text-indigo-600">{stats.pulseAvg || '--'} <span className="text-sm font-medium text-gray-400">/ 100</span></p>
                 </div>
               )}
               {kpiConfig.hrTrend && (
@@ -636,33 +506,17 @@ export default function App() {
               {kpiConfig.maxHr && (
                 <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
                   <div className="bg-purple-50 p-3 rounded-full text-purple-600"><Activity className="w-6 h-6" /></div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-500">Highest Max HR</p>
-                    <p className="text-2xl font-bold text-gray-900">{stats.maxHr || '--'} <span className="text-sm font-normal text-gray-500">bpm</span></p>
-                  </div>
-                </div>
-              )}
-              {kpiConfig.totalElevation && (
-                <div className="flex-1 min-w-[200px] bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center space-x-4">
-                  <div className="bg-amber-50 p-3 rounded-full text-amber-600"><TrendingUp className="w-6 h-6" /></div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-500">Elevation Gain</p>
-                    <p className="text-2xl font-bold text-gray-900">{stats.totalElevation.toLocaleString()} <span className="text-sm font-normal text-gray-500">ft</span></p>
-                  </div>
+                  <div><p className="text-sm font-medium text-gray-500">Highest Max HR</p><p className="text-2xl font-bold text-gray-900">{stats.maxHr || '--'} <span className="text-sm font-normal text-gray-500">bpm</span></p></div>
                 </div>
               )}
             </div>
 
-            {/* Dynamic Trends Chart */}
+            {/* Dropdown Trends Chart */}
             <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center">
                   <MetricIcon className="w-6 h-6 mr-3" style={{ color: activeMetricConfig.color }} />
-                  <select
-                    value={chartMetric}
-                    onChange={(e) => setChartMetric(e.target.value)}
-                    className="text-xl font-bold text-gray-800 bg-transparent outline-none cursor-pointer hover:text-gray-500 transition-colors border-none p-0 focus:ring-0"
-                  >
+                  <select value={chartMetric} onChange={(e) => setChartMetric(e.target.value)} className="text-xl font-bold text-gray-800 bg-transparent outline-none cursor-pointer hover:text-gray-500 transition-colors border-none p-0 focus:ring-0">
                     {Object.entries(CHART_METRICS).map(([key, config]) => (
                       <option key={key} value={key}>{config.label} Trends</option>
                     ))}
@@ -679,35 +533,18 @@ export default function App() {
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
                       <XAxis dataKey="date" tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} stroke="#9ca3af" fontSize={12} tickMargin={10} />
                       <YAxis 
-                        domain={getChartYDomain()} 
+                        domain={chartYDomain} 
                         stroke="#9ca3af" 
                         fontSize={12} 
-                        tickFormatter={yAxisTickFormatter} 
-                        reversed={chartMetric === 'paceSeconds'} // Reverse pace so faster (lower time) is visually higher
+                        tickFormatter={(val) => chartMetric === 'rawSpeed' ? formatPace(val) : Math.round(val)} 
                       />
                       <Tooltip 
                         contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
                         labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})} 
-                        formatter={tooltipFormatter} 
+                        formatter={(value) => [chartMetric === 'rawSpeed' ? formatPace(value) + ' /mi' : `${value} ${activeMetricConfig.unit}`, activeMetricConfig.label]} 
                       />
-                      {chartAvg > 0 && (
-                        <ReferenceLine 
-                          y={chartAvg} 
-                          stroke="#e5e7eb" 
-                          strokeDasharray="3 3" 
-                          label={{ position: 'insideTopLeft', value: `Avg: ${chartMetric === 'paceSeconds' ? formatSecondsToPaceString(chartAvg) : chartAvg}`, fill: '#9ca3af', fontSize: 12 }} 
-                        />
-                      )}
-                      <Line 
-                        type="monotone" 
-                        dataKey={chartMetric} 
-                        stroke={activeMetricConfig.color} 
-                        strokeWidth={3} 
-                        dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }} 
-                        activeDot={{ r: 6, strokeWidth: 0 }} 
-                        name={activeMetricConfig.label} 
-                        connectNulls={true} 
-                      />
+                      {chartAvg > 0 && <ReferenceLine y={chartAvg} stroke="#e5e7eb" strokeDasharray="3 3" label={{ position: 'insideTopLeft', value: `Avg: ${chartMetric === 'rawSpeed' ? formatPace(chartAvg) : chartAvg}`, fill: '#9ca3af', fontSize: 12 }} />}
+                      <Line type="monotone" dataKey={chartMetric} stroke={activeMetricConfig.color} strokeWidth={3} dot={{ r: 3, fill: activeMetricConfig.color, strokeWidth: 0 }} activeDot={{ r: 6, strokeWidth: 0 }} connectNulls={true} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
@@ -722,15 +559,9 @@ export default function App() {
                   Activity Database
                 </h2>
                 <div className="flex items-center space-x-3">
-                  <span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border border-gray-100 hidden sm:inline-block">
-                    Showing {sortedRuns.length} runs
-                  </span>
-                  <button 
-                    onClick={() => { setTempColumnConfig(columnConfig); setShowColumnModal(true); }}
-                    className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-1.5 rounded-lg shadow-sm transition-colors"
-                  >
-                    <Settings2 className="w-4 h-4 mr-2" />
-                    Columns
+                  <span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border border-gray-100 hidden sm:inline-block">Showing {sortedRuns.length} runs</span>
+                  <button onClick={() => { setTempColumnConfig(columnConfig); setShowColumnModal(true); }} className="flex items-center text-sm font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 px-3 py-1.5 rounded-lg shadow-sm transition-colors">
+                    <Settings2 className="w-4 h-4 mr-2" /> Columns
                   </button>
                 </div>
               </div>
@@ -740,11 +571,7 @@ export default function App() {
                   <thead className="bg-gray-50">
                     <tr>
                       {visibleColumns.map((col) => (
-                        <th 
-                          key={col.key}
-                          onClick={() => requestSort(col.key)}
-                          className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100 transition-colors select-none group whitespace-nowrap"
-                        >
+                        <th key={col.key} onClick={() => requestSort(col.key)} className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider cursor-pointer hover:bg-gray-100 transition-colors select-none group whitespace-nowrap">
                           <div className="flex items-center">
                             {col.label}
                             {sortConfig.key === col.key ? (
@@ -757,18 +584,11 @@ export default function App() {
                     <tr className="bg-white border-b border-gray-200 shadow-sm">
                       {visibleColumns.map((col) => (
                         <th key={`filter-${col.key}`} className="px-3 py-2 font-normal">
-                          <input
-                            type="text"
-                            placeholder={`Filter...`}
-                            value={filters[col.key] || ''}
-                            onChange={(e) => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))}
-                            className="w-full text-xs p-1.5 border border-gray-200 rounded bg-gray-50 text-gray-700 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all placeholder:text-gray-400"
-                          />
+                          <input type="text" placeholder={`Filter...`} value={filters[col.key] || ''} onChange={(e) => setFilters(prev => ({ ...prev, [col.key]: e.target.value }))} className="w-full text-xs p-1.5 border border-gray-200 rounded bg-gray-50 text-gray-700 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all placeholder:text-gray-400" />
                         </th>
                       ))}
                     </tr>
                   </thead>
-                  
                   <tbody className="bg-white divide-y divide-gray-100">
                     {loading ? (
                       <tr><td colSpan={visibleColumns.length} className="text-center py-12 text-gray-400">Loading data...</td></tr>
@@ -776,11 +596,7 @@ export default function App() {
                       <tr><td colSpan={visibleColumns.length} className="text-center py-12 text-gray-400">No runs match your filters.</td></tr>
                     ) : (
                       sortedRuns.map((run) => (
-                        <tr 
-                          key={run.id} 
-                          onClick={() => setSelectedRun(run)}
-                          className="hover:bg-blue-50/50 transition-colors cursor-pointer group"
-                        >
+                        <tr key={run.id} onClick={() => setSelectedRun(run)} className="hover:bg-blue-50/50 transition-colors cursor-pointer group">
                           {visibleColumns.map((col) => (
                             <td key={`${run.id}-${col.key}`} className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 group-hover:text-blue-900 transition-colors">
                               {renderCellContent(run, col.key)}
@@ -791,87 +607,6 @@ export default function App() {
                     )}
                   </tbody>
                 </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* --- VIEW: ADVANCED ANALYTICS (Multi-Metric Chart) --- */}
-        {activeTab === 'analytics' && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-              <div className="mb-6 border-b border-gray-100 pb-4">
-                <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-                  <BarChart3 className="w-6 h-6 mr-3 text-indigo-500" /> 
-                  Distance vs. Pace vs. Heart Rate
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  Visualize how your pace and heart rate respond to different running volumes. This chart maps your entire loaded history.
-                </p>
-              </div>
-
-              <div className="h-[500px] w-full mt-4">
-                {chartData.length < 2 ? (
-                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">Not enough data to map advanced correlations.</div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={chartData} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                      <XAxis 
-                        dataKey="date" 
-                        tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} 
-                        stroke="#9ca3af" 
-                        fontSize={12} 
-                        tickMargin={10} 
-                      />
-                      
-                      {/* Left Y-Axis: Distance (Bars) */}
-                      <YAxis 
-                        yAxisId="distance" 
-                        orientation="left" 
-                        stroke="#3b82f6" 
-                        fontSize={12} 
-                        label={{ value: 'Distance (mi)', angle: -90, position: 'insideLeft', style: { textAnchor: 'middle', fill: '#3b82f6', fontSize: 12 } }}
-                      />
-                      
-                      {/* Right Y-Axis 1: Heart Rate (Red Line) */}
-                      <YAxis 
-                        yAxisId="hr" 
-                        orientation="right" 
-                        stroke="#f43f5e" 
-                        fontSize={12} 
-                        domain={['dataMin - 10', 'dataMax + 10']}
-                        label={{ value: 'Avg HR (bpm)', angle: 90, position: 'insideRight', style: { textAnchor: 'middle', fill: '#f43f5e', fontSize: 12 } }}
-                      />
-
-                      {/* Right Y-Axis 2: Pace (Green Line - Hidden axis scale to avoid clutter, but maps the data) */}
-                      <YAxis 
-                        yAxisId="pace" 
-                        orientation="right" 
-                        hide={true} 
-                        reversed={true} // Reverse so faster pace is higher
-                        domain={['dataMin - 15', 'dataMax + 15']}
-                      />
-
-                      <Tooltip 
-                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
-                        labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})}
-                        formatter={(value, name) => {
-                          if (name === 'Average Pace') return [`${formatSecondsToPaceString(value)} /mi`, name];
-                          if (name === 'Distance') return [`${value} mi`, name];
-                          if (name === 'Average HR') return [`${value} bpm`, name];
-                          return [value, name];
-                        }}
-                      />
-                      <Legend verticalAlign="top" height={36} iconType="circle" wrapperStyle={{ fontSize: '13px' }}/>
-                      
-                      {/* Data Elements */}
-                      <Bar yAxisId="distance" dataKey="distance" name="Distance" fill="#eff6ff" stroke="#3b82f6" strokeWidth={1} radius={[4, 4, 0, 0]} barSize={20} />
-                      <Line yAxisId="pace" type="monotone" dataKey="paceSeconds" name="Average Pace" stroke="#10b981" strokeWidth={3} dot={false} activeDot={{ r: 6, strokeWidth: 0 }} connectNulls={true} />
-                      <Line yAxisId="hr" type="monotone" dataKey="avgHr" name="Average HR" stroke="#f43f5e" strokeWidth={3} dot={false} activeDot={{ r: 6, strokeWidth: 0 }} connectNulls={true} />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                )}
               </div>
             </div>
           </div>
@@ -923,6 +658,94 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* --- VIEW: ADVANCED ANALYTICS TAB --- */}
+        {activeTab === 'analytics' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            {/* Multi-Metric Chart (Distance vs Pace vs HR) */}
+            <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+              <div className="mb-6">
+                <h2 className="text-2xl font-bold text-gray-800 flex items-center"><BarChart3 className="w-6 h-6 mr-2 text-indigo-500" /> Multi-Metric Overview</h2>
+                <p className="text-sm text-gray-500 mt-1">A combined view of Distance (Bars), Average Pace (Green Line), and Average Heart Rate (Red Line).</p>
+              </div>
+              <div className="h-96 w-full">
+                {chartData.length < 2 ? (
+                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">Not enough data to chart.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: -20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                      <XAxis dataKey="date" tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} stroke="#9ca3af" fontSize={12} tickMargin={10} />
+                      {/* Left Axis: Distance */}
+                      <YAxis yAxisId="dist" orientation="left" stroke="#3b82f6" fontSize={12} />
+                      {/* Right Axis: Heart Rate */}
+                      <YAxis yAxisId="hr" orientation="right" domain={['dataMin - 10', 'dataMax + 10']} stroke="#f43f5e" fontSize={12} />
+                      {/* Invisible Axis: Pace (scaled automatically so faster m/s goes UP) */}
+                      <YAxis yAxisId="pace" orientation="right" domain={['dataMin', 'dataMax']} hide={true} />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
+                        labelFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric'})} 
+                        formatter={(value, name) => {
+                          if (name === 'rawSpeed') return [formatPace(value) + ' /mi', 'Pace'];
+                          if (name === 'distance') return [value + ' mi', 'Distance'];
+                          if (name === 'avgHr') return [value + ' bpm', 'Avg HR'];
+                          return [value, name];
+                        }}
+                      />
+                      <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                      <Bar yAxisId="dist" dataKey="distance" name="Distance" fill="#3b82f6" opacity={0.6} radius={[4, 4, 0, 0]} />
+                      <Line yAxisId="pace" type="monotone" dataKey="rawSpeed" name="Average Pace" stroke="#10b981" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 6 }} connectNulls />
+                      <Line yAxisId="hr" type="monotone" dataKey="avgHr" name="Average HR" stroke="#f43f5e" strokeWidth={3} dot={{ r: 3 }} activeDot={{ r: 6 }} connectNulls />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+
+            {/* Dedicated Pulse+ Trend Graph */}
+            <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+              <div className="mb-6">
+                <h2 className="text-2xl font-bold text-gray-800 flex items-center"><LineChartIcon className="w-6 h-6 mr-2 text-indigo-600" /> Pulse+ Score Progression</h2>
+                <p className="text-sm text-gray-500 mt-1">Hover over any point to see exactly how your Heart Rate, Pace, and Distance contributed to the score.</p>
+              </div>
+              <div className="h-72 w-full">
+                {chartData.length < 2 ? (
+                  <div className="h-full w-full flex items-center justify-center text-gray-400 text-sm">Not enough data to chart.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: -20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                      <XAxis dataKey="date" tickFormatter={(val) => parseLocalDateString(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric'})} stroke="#9ca3af" fontSize={12} tickMargin={10} />
+                      <YAxis domain={[0, 100]} stroke="#9ca3af" fontSize={12} />
+                      <Tooltip 
+                        content={({ active, payload, label }) => {
+                          if (active && payload && payload.length) {
+                            const data = payload[0].payload;
+                            if (!data.pulsePlusBreakdown) return null;
+                            const bd = data.pulsePlusBreakdown;
+                            return (
+                              <div className="bg-white p-4 rounded-xl shadow-xl border border-gray-100 min-w-[200px]">
+                                <p className="font-bold text-gray-800 mb-1">{parseLocalDateString(label).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric'})}</p>
+                                <p className="text-2xl font-black text-indigo-600 mb-3 border-b border-gray-100 pb-2">Score: {bd.total}</p>
+                                <div className="space-y-1.5 text-sm">
+                                  <div className="flex justify-between items-center"><span className="flex items-center text-gray-500"><Heart className="w-3.5 h-3.5 mr-1.5 text-rose-500"/> HR:</span> <span className="font-bold text-gray-900">{bd.hr} <span className="text-xs text-gray-400 font-normal">/ 50</span></span></div>
+                                  <div className="flex justify-between items-center"><span className="flex items-center text-gray-500"><Clock className="w-3.5 h-3.5 mr-1.5 text-blue-500"/> Pace:</span> <span className="font-bold text-gray-900">{bd.pace} <span className="text-xs text-gray-400 font-normal">/ 30</span></span></div>
+                                  <div className="flex justify-between items-center"><span className="flex items-center text-gray-500"><MapPin className="w-3.5 h-3.5 mr-1.5 text-green-500"/> Dist:</span> <span className="font-bold text-gray-900">{bd.dist} <span className="text-xs text-gray-400 font-normal">/ 20</span></span></div>
+                                </div>
+                              </div>
+                            );
+                          }
+                          return null;
+                        }}
+                      />
+                      <Line type="monotone" dataKey="pulsePlus" name="Pulse+ Score" stroke="#4f46e5" strokeWidth={4} dot={{ r: 4, fill: '#4f46e5', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 7, strokeWidth: 0 }} connectNulls={true} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* --- Modals Below --- */}
@@ -942,6 +765,19 @@ export default function App() {
               <button onClick={() => setSelectedRun(null)} className="p-2 bg-gray-100 hover:bg-gray-200 rounded-full text-gray-500 hover:text-gray-700 transition-colors"><X className="w-5 h-5" /></button>
             </div>
             <div className="flex-1 overflow-y-auto p-6 space-y-8">
+              
+              {selectedRun.pulsePlus > 0 && (
+                <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-5 flex items-center justify-between">
+                  <div>
+                    <h4 className="text-lg font-bold text-indigo-900 flex items-center"><Activity className="w-5 h-5 mr-2 text-indigo-600" /> Pulse+ Efficiency Score</h4>
+                    <p className="text-sm text-indigo-700 mt-1">A synthesized score combining HR (50%), Pace (30%), and Distance (20%).</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-4xl font-black text-indigo-600">{selectedRun.pulsePlus}</p>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-blue-50/50 border border-blue-100 p-4 rounded-xl">
                   <p className="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-1 flex items-center"><MapPin className="w-3.5 h-3.5 mr-1" /> Distance</p>
@@ -995,7 +831,6 @@ export default function App() {
               <h3 className="text-xl font-bold text-gray-900 mb-1">Customize Table Columns</h3>
               <p className="text-sm text-gray-500">Toggle visibility and use the arrows to reorder.</p>
             </div>
-            
             <div className="overflow-y-auto p-6 space-y-2 flex-1">
               {tempColumnConfig.map((col, index) => (
                 <div key={col.key} className={`flex items-center justify-between p-3 rounded-lg border transition-all ${col.visible ? 'border-blue-200 bg-white shadow-sm' : 'border-gray-200 bg-gray-50 opacity-60'}`}>
@@ -1012,7 +847,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-
             <div className="p-6 border-t border-gray-100 bg-gray-50 rounded-b-2xl flex space-x-3">
               <button onClick={saveColumnPreferences} className="flex-1 bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors">Save Layout</button>
               <button onClick={() => setShowColumnModal(false)} className="flex-1 bg-gray-200 text-gray-700 font-medium py-2.5 rounded-lg hover:bg-gray-300 transition-colors">Cancel</button>
@@ -1029,9 +863,10 @@ export default function App() {
             <p className="text-sm text-gray-500 mb-6">Select which metrics you want to see pinned to the top of your dashboard.</p>
             <div className="space-y-3 mb-6">
               {[
-                { id: 'totalDistance', label: 'Total Distance', icon: MapPin }, { id: 'totalRuns', label: 'Total Runs', icon: Clock },
-                { id: 'avgHr', label: 'Average HR', icon: Heart }, { id: 'hrTrend', label: 'HR Trend', icon: TrendingDown },
-                { id: 'maxHr', label: 'Highest Max HR', icon: Activity }, { id: 'totalElevation', label: 'Total Elevation Gain', icon: TrendingUp },
+                { id: 'pulsePlus', label: 'Pulse+ Score', icon: Activity }, { id: 'totalDistance', label: 'Total Distance', icon: MapPin }, 
+                { id: 'totalRuns', label: 'Total Runs', icon: Clock }, { id: 'avgHr', label: 'Average HR', icon: Heart }, 
+                { id: 'hrTrend', label: 'HR Trend', icon: TrendingDown }, { id: 'maxHr', label: 'Highest Max HR', icon: Activity }, 
+                { id: 'totalElevation', label: 'Total Elevation Gain', icon: TrendingUp },
               ].map((kpi) => {
                 const Icon = kpi.icon;
                 const isActive = tempKpiConfig[kpi.id];
